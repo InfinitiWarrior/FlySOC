@@ -32,9 +32,15 @@ pub const FLIES: [(&str, &[&str]); 5] = [
     ("single fly", &["conn", "auth", "proc", "dns"]),
 ];
 const SPECIALISTS: usize = 4;
-/// A fly fires above this quantile of its evidence on calm training seconds. The maximum (1.0) grew
-/// with the length of the training file and hung on one odd second (ISSUES O9).
-const CALM_QUANTILE: f64 = 0.999;
+/// A fly fires above this quantile of its evidence on calm seconds (training replay plus
+/// CALIBRATION, ~14,000 s). The maximum hung on one odd second (ISSUES L7); chosen on the eval set
+/// once the calibration file existed (L8).
+const CALM_QUANTILE: f64 = 0.995;
+/// Benign traffic with every look-alike, replayed after training: its seconds join the training
+/// replay's calm seconds for the thresholds, so they rest on ~14,000 calm seconds instead of a
+/// training file's ~1,700, and do not depend on which rare benign bursts that file has (ISSUES L8).
+/// Written by tools/gen_intrusion.py.
+pub const CALIBRATION: &str = "data/telemetry/cluster_calib.jsonl";
 /// Individual flies per role. Each smells the same kinds through different glomeruli; their
 /// output spikes are summed into one voter, so the coordinator still sees five roles.
 pub fn replicas() -> usize {
@@ -57,8 +63,9 @@ pub struct Cluster {
 }
 
 /// Puts one copy of the circuit per fly into a single simulation, trains every fly on its own
-/// slice of `train` at once, then calibrates each fly's threshold on a replay without learning.
-/// The result is cached in data/cache/, keyed on the training file and the FlySOC binary, so a
+/// slice of `train` at once, then calibrates each fly's threshold on replays without learning of
+/// `train` and CALIBRATION. The result is cached in data/cache/, keyed on the training file, the
+/// calibration file and the FlySOC binary, so a
 /// rebuild or different training data retrains, and anything else loads in a moment.
 pub fn build(device: &wgpu::Device, queue: &wgpu::Queue, circuit: Fly, syn: Synapses, train_path: &str) -> Result<Cluster, String> {
     let (syn, one) = MushroomBody::split(&circuit, syn);
@@ -71,8 +78,10 @@ pub fn build(device: &wgpu::Device, queue: &wgpu::Queue, circuit: Fly, syn: Syna
         .collect();
 
     let train_bytes = std::fs::read(train_path).map_err(|e| format!("{train_path}: {e}"))?;
+    let calib_bytes = std::fs::read(CALIBRATION).map_err(|e| format!("{CALIBRATION}: {e} (run tools/gen_intrusion.py)"))?;
     let exe = std::env::current_exe().and_then(std::fs::read).unwrap_or_default();
-    let cache = format!("data/cache/cluster{k}-{:016x}.bin", detect::fnv(&train_bytes) ^ detect::fnv(&exe).rotate_left(1));
+    let key = detect::fnv(&train_bytes) ^ detect::fnv(&exe).rotate_left(1) ^ detect::fnv(&calib_bytes).rotate_left(2);
+    let cache = format!("data/cache/cluster{k}-{key:016x}.bin");
     if let Some((w, thresholds)) = load_cache(&cache, mb.plastic.w.len(), FLIES.len()) {
         sim.set_plastic(queue, &w);
         eprintln!("loaded the trained cluster from {cache}");
@@ -87,6 +96,9 @@ pub fn build(device: &wgpu::Device, queue: &wgpu::Queue, circuit: Fly, syn: Syna
     eprintln!("  trained in {:.1} s; calibrating thresholds on a replay...", t.elapsed().as_secs_f32());
     let t = std::time::Instant::now();
     let replay = pool(detect::play(device, queue, &sim, &circuit, &encs, &train, secs, None));
+    let calib = detect::read_events(CALIBRATION)?;
+    let calib_secs = detect::duration(&calib);
+    let calib_replay = pool(detect::play(device, queue, &sim, &circuit, &encs, &calib, calib_secs, None));
     eprintln!("  calibrated in {:.1} s", t.elapsed().as_secs_f32());
 
     // Training seconds that are safe to calibrate on: no intrusion in them or in the evidence
@@ -99,9 +111,11 @@ pub fn build(device: &wgpu::Device, queue: &wgpu::Queue, circuit: Fly, syn: Syna
     }
     let thresholds = replay
         .iter()
-        .map(|w| {
+        .zip(&calib_replay)
+        .map(|(w, cw)| {
             let ev = evidence(w);
             let mut c: Vec<f64> = (0..secs).filter(|&s| calm[s]).map(|s| ev[s]).collect();
+            c.extend(evidence(cw).into_iter().skip(MEMORY_S)); // all calm: no intrusions in it
             c.sort_by(f64::total_cmp);
             c.get(((c.len() as f64 - 1.0) * CALM_QUANTILE).round() as usize).copied().unwrap_or(0.0)
         })
@@ -240,10 +254,12 @@ pub fn run(fly: &Fly, syn: Synapses, train: &str, events: &str) -> Result<(), St
         }
     }
     if let Ok(path) = std::env::var("FLYSOC_TRACE") {
-        let mut out = format!("sec\t{}\tlabels\n", FLIES.map(|f| f.0).join("\t"));
+        let kc = |f: &str| format!("{f}_kc");
+        let mut out = format!("sec\t{}\t{}\tlabels\n", FLIES.map(|f| f.0).join("\t"), FLIES.map(|f| kc(f.0)).join("\t"));
         for s in 0..seconds {
             let row: Vec<String> = windows.iter().map(|w| w[s].spikes[detect::DETECT_ON].to_string()).collect();
-            out += &format!("{s}\t{}\t{}\n", row.join("\t"), labels[s].join(","));
+            let kcs: Vec<String> = windows.iter().map(|w| w[s].spikes[1].to_string()).collect();
+            out += &format!("{s}\t{}\t{}\t{}\n", row.join("\t"), kcs.join("\t"), labels[s].join(","));
         }
         std::fs::write(&path, out).map_err(|e| format!("{path}: {e}"))?;
     }

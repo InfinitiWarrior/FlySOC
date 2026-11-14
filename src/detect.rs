@@ -31,9 +31,12 @@ const GLOMERULI_PER_FEATURE: u8 = 2;
 /// History components get more glomeruli: they carry the pattern that tells an attack from a
 /// look-alike, and with 2 they are drowned out by the event's own fields.
 const GLOMERULI_PER_HISTORY: u8 = 4;
-/// Glomeruli reserved for history components (a quarter of 53, at most half of a fly's); no field
-/// hashes into them.
+/// Glomeruli reserved for history components, at most half of a fly's; no field hashes into them.
+/// A fly that smells a kind with a long-window count (all but processes) gets two ordinal codes of
+/// 10, for the last minute and the long window; a processes-only fly keeps one code of 13, so its
+/// fields keep 40 glomeruli.
 const HISTORY_GLOMERULI: usize = 13;
+const HISTORY_GLOMERULI_TWO_CODES: usize = 20;
 /// Each event is a puff: its receptor neurons fire PUFF_SPIKES times, PUFF_GAP_MS apart, like a
 /// real odour response (~250 Hz for ~20 ms). A single synchronous spike barely reaches Kenyon cells.
 const PUFF_SPIKES: usize = 5;
@@ -126,6 +129,7 @@ impl MushroomBody {
     }
 }
 
+
 fn member(fly: &Fly, class: &str) -> Vec<bool> {
     let mut v = vec![false; fly.n as usize];
     fly.of_class(class).into_iter().for_each(|i| v[i as usize] = true);
@@ -195,8 +199,12 @@ fn base_domain(q: &str) -> String {
     labels[labels.len().saturating_sub(2)..].join(".")
 }
 
-/// How far back `History` looks.
+/// How far back `History` looks: every count over the last minute, and fan-out counts (ports,
+/// failed users, DNS names) also over LONG_HISTORY_S, so a scan or spray spread over many minutes
+/// (low and slow) still adds up. Processes stay short: benign hosts cycle through all of theirs
+/// within minutes. (ISSUES E10)
 const HISTORY_S: f64 = 60.0;
+const LONG_HISTORY_S: f64 = 900.0;
 
 /// Sliding-window summaries of the telemetry stream, added to each event's odour as extra
 /// components. Single events of a scan or a password spray look ordinary; the pattern across
@@ -207,51 +215,47 @@ pub struct History {
 }
 
 impl History {
-    /// Records `value` under `key` at `ts` and returns how many distinct values `key` had in the
-    /// last HISTORY_S seconds.
-    fn distinct(&mut self, key: String, ts: f64, value: String) -> usize {
+    /// Distinct values under `key` in the last HISTORY_S and the last `keep` seconds, after
+    /// recording `value` at `ts` if given.
+    fn distinct(&mut self, key: String, ts: f64, value: Option<String>, keep: f64) -> (usize, usize) {
         let q = self.seen.entry(key).or_default();
-        q.push_back((ts, value));
-        while q.front().is_some_and(|(t, _)| *t < ts - HISTORY_S) {
+        if let Some(v) = value {
+            q.push_back((ts, v));
+        }
+        while q.front().is_some_and(|(t, _)| *t < ts - keep) {
             q.pop_front();
         }
-        q.iter().map(|(_, v)| v).collect::<std::collections::HashSet<_>>().len()
+        let count = |span: f64| q.iter().filter(|(t, _)| *t >= ts - span).map(|(_, v)| v).collect::<std::collections::HashSet<_>>().len();
+        (count(HISTORY_S), count(keep))
     }
 
-    /// Distinct values under `key` without recording anything.
-    fn peek(&self, key: &str, ts: f64) -> usize {
-        self.seen.get(key).map_or(0, |q| {
-            q.iter().filter(|(t, _)| *t >= ts - HISTORY_S).map(|(_, v)| v).collect::<std::collections::HashSet<_>>().len()
-        })
-    }
-
-    /// Updates the history with `e` and returns its history component, the raw count behind it,
-    /// and the entities (hosts, users) the count is about.
+    /// Updates the history with `e` and returns its history components, the raw count behind
+    /// them (the longest window's), and the entities (hosts, users) the count is about.
     pub fn observe(&mut self, e: &Event) -> Seen {
         let f = |o: &Option<String>| o.clone().unwrap_or_default();
         let bucket = |n: usize| usize::BITS - n.leading_zeros();
-        let (name, count) = match e.kind.as_str() {
+        let (name, (short, long), slow) = match e.kind.as_str() {
             // distinct ports this source touched: a scan touches many
-            "conn" => ("src_ports", self.distinct(format!("ports<{}", f(&e.src)), e.ts, e.dport.unwrap_or(0).to_string())),
+            "conn" => ("src_ports", self.distinct(format!("ports<{}", f(&e.src)), e.ts, Some(e.dport.unwrap_or(0).to_string()), LONG_HISTORY_S), true),
             // distinct users failing from this source: a spray fails many, a typo one
             "auth" => {
-                let key = format!("failed<{}", f(&e.src));
-                let n = match e.result.as_deref() == Some("fail") {
-                    true => self.distinct(key, e.ts, f(&e.user)),
-                    false => self.peek(&key, e.ts),
-                };
-                ("src_failed_users", n)
+                let failed = (e.result.as_deref() == Some("fail")).then(|| f(&e.user));
+                ("src_failed_users", self.distinct(format!("failed<{}", f(&e.src)), e.ts, failed, LONG_HISTORY_S), true)
             }
             // distinct processes started on this host: remote command sessions start several
-            "proc" => ("host_processes", self.distinct(format!("procs<{}", f(&e.host)), e.ts, f(&e.process))),
+            "proc" => ("host_processes", self.distinct(format!("procs<{}", f(&e.host)), e.ts, Some(f(&e.process)), HISTORY_S), false),
             // distinct names this host looked up under one base domain: tunnels use many
             "dns" => {
                 let q = f(&e.query);
-                ("names_per_domain", self.distinct(format!("names<{}|{}", f(&e.host), base_domain(&q)), e.ts, q))
+                ("names_per_domain", self.distinct(format!("names<{}|{}", f(&e.host), base_domain(&q)), e.ts, Some(q), LONG_HISTORY_S), true)
             }
             _ => return Seen::default(),
         };
-        Seen { components: vec![format!("{name}={}", bucket(count))], count, entities: e.entities() }
+        let mut components = vec![format!("{name}={}", bucket(short))];
+        if slow {
+            components.push(format!("{name}_long={}", bucket(long)));
+        }
+        Seen { components, count: long, entities: e.entities() }
     }
 }
 
@@ -312,7 +316,9 @@ impl Encoder {
         // Fields hash into the first glomeruli. History components get the last HISTORY_GLOMERULI,
         // which no field can reach, in an ordinal code: bucket b lights b .. b+3, so neighbouring
         // magnitudes overlap and distant ones never do, the same in every individual (O7).
-        let reserved = HISTORY_GLOMERULI.min(self.glomeruli.len() / 2) as u64;
+        let two = self.kinds.iter().any(|k| k != "proc");
+        let wanted = if two { HISTORY_GLOMERULI_TWO_CODES } else { HISTORY_GLOMERULI };
+        let reserved = wanted.min(self.glomeruli.len() / 2) as u64;
         let fields = self.glomeruli.len() as u64 - reserved;
         let hashed = e.features().into_iter().flat_map(move |feature| {
             (0..GLOMERULI_PER_FEATURE).map(move |k| {
@@ -320,9 +326,14 @@ impl Encoder {
                 fnv(&[feature.as_bytes(), &[k], salt].concat()) % fields
             })
         });
+        // Two codes side by side: the last minute, and the long window ("_long" components).
+        let codes = if two && reserved >= 2 { 2 } else { 1 };
+        let size = reserved / codes;
         let ordinal = history.iter().flat_map(move |h| {
-            let bucket = h.rsplit('=').next().and_then(|b| b.parse::<u64>().ok()).unwrap_or(0);
-            (0..GLOMERULI_PER_HISTORY as u64).map(move |k| fields + (bucket + k).min(reserved - 1))
+            let (name, bucket) = h.rsplit_once('=').unwrap_or((h, "0"));
+            let bucket = bucket.parse::<u64>().unwrap_or(0);
+            let offset = fields + if codes == 2 && name.ends_with("_long") { size } else { 0 };
+            (0..GLOMERULI_PER_HISTORY as u64).map(move |k| offset + (bucket + k).min(size - 1))
         });
         let chosen: Vec<u64> = hashed.chain(ordinal).collect();
         Some(chosen.into_iter().flat_map(move |g| self.glomeruli[g as usize].iter().copied()))
@@ -566,7 +577,7 @@ mod tests {
     }
 
     #[test]
-    fn history_counts_fan_out_in_the_last_minute() {
+    fn history_counts_fan_out_over_a_minute_and_a_long_window() {
         let mut h = History::default();
         let fail = |ts: f64, user: &str| Event {
             ts,
@@ -577,17 +588,21 @@ mod tests {
             ..Default::default()
         };
         // a typo: the same user failing again stays at 1 distinct user (bucket 1)
-        assert_eq!(h.observe(&fail(0.0, "u01")).components, ["src_failed_users=1"]);
-        assert_eq!(h.observe(&fail(5.0, "u01")).components, ["src_failed_users=1"]);
+        assert_eq!(h.observe(&fail(0.0, "u01")).components, ["src_failed_users=1", "src_failed_users_long=1"]);
+        assert_eq!(h.observe(&fail(5.0, "u01")).components, ["src_failed_users=1", "src_failed_users_long=1"]);
         // a spray: 8 distinct users -> bucket 4 (8..15)
         let mut last: Vec<String> = vec![];
         for (k, u) in ["u02", "u03", "u04", "u05", "u06", "u07", "u08"].iter().enumerate() {
             last = h.observe(&fail(10.0 + k as f64, u)).components;
         }
-        assert_eq!(last, ["src_failed_users=4"]);
-        // a minute later it has all expired; the suspect is the failing source and the user
+        assert_eq!(last, ["src_failed_users=4", "src_failed_users_long=4"]);
+        // a minute later the short count has expired, the long one still sees all 9 users (a slow
+        // spray adds up there); the suspect is the failing source and the user
         let seen = h.observe(&fail(100.0, "u09"));
-        assert_eq!(seen.components, ["src_failed_users=1"]);
+        assert_eq!(seen.components, ["src_failed_users=1", "src_failed_users_long=4"]);
+        assert_eq!(seen.count, 9);
+        // 15 minutes later both have expired
+        assert_eq!(h.observe(&fail(1100.0, "u01")).components, ["src_failed_users=1", "src_failed_users_long=1"]);
         assert_eq!(seen.entities, ["10.0.0.7", "u09"]);
     }
 

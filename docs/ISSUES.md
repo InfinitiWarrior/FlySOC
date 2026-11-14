@@ -18,10 +18,11 @@ Phases follow the design notes' roadmap: P0 viewer, P1 encoding, P2 learning, P3
 
 ### O1. The team does not beat the single fly on everything (P3)
 **Symptom**: on the final set (10 intrusions, 50 look-alikes, never used for choices), the default
-rule D (the team confirms the single fly) catches 10/10 at +94 s with 0 false-alarm seconds and
-22/50 look-alikes. The single fly alone does the same (+94 s, 0, 25/50). The team no longer costs
-time, but no rule beats the single fly clearly either. (Before E9 and L7: D 16 false seconds and
-+137 s, single fly 46 and +102 s.)
+rule D (the team confirms the single fly) catches 10/10 at a median +89 s, with 20/50 look-alikes
+and 2/2549 false-alarm seconds. The single fly alone: 10/10, +78 s, 21/50, 2. The team costs a
+little time and buys nothing measurable. (Before E9 and L7: D 16 false seconds and +137 s, single
+fly 46 and +102 s; before L8, both +94 s on thresholds set too low by luck; before E10, D +360 s.)
+O12 is the same weakness seen from red's side: rule D can only be as good as the single fly.
 **Cause, as far as we can tell**: requiring agreement costs time. The history components (E7) helped
 the single fly as much as the specialists, and one circuit has enough capacity for all four kinds.
 **Next**: a coordinator that learns how much to trust each fly, per-entity learning from look-alike
@@ -41,17 +42,6 @@ every minute or so (see S8).
 **Status**: detection no longer uses the whole brain (see L1, L2), so this only affects the viewer.
 The proper fix would be homeostasis, or the layered rule from L2 applied brain-wide.
 
-### O9. Retraining on red's evasions made blue less sensitive (P4)
-**Symptom**: blue retrained on the training file plus red's 3 best intrusions, each in fresh
-background (`red.py harden`, 2400 s → 7000 s of training). Against those intrusions, replayed into 3
-backgrounds neither side had seen, the original blue caught 11/12 and the retrained blue 7/12.
-**First guess, wrong**: a fly's threshold was the highest evidence on calm training seconds (M4),
-and more calm seconds give a higher maximum. Thresholds are now the 99.9th percentile (L7), which
-does not grow with file length, but the duel came out the same: original blue 10/12, retrained 7/12.
-**Next**: compare the two blues' thresholds and evidence on red's intrusions, stage by stage. Likely
-suspects: the hardened training adds 3 intrusions' worth of depression-free "unsafe" seconds that
-learning cannot use (learning only depresses on safe seconds, L5), and 4600 s more benign traffic
-that depresses more Kenyon cell synapses overall.
 
 ### O10. Red's undetected intrusions were lucky backgrounds (P4)
 **Symptom**: in the first red run (8 generations of 8), 19 of 64 candidates were never caught, from
@@ -69,10 +59,32 @@ slow scan 0.64. Blue caught 28 of the 35.
 **What it means**: with this blue, when an intrusion is caught depends more on the background
 traffic than on the intrusion's pacing. Red's optimiser cannot beat that noise with 3 samples, and
 no pacing change reliably evades. Blue missing 1 in 5 regardless is the real weakness.
-**Next**: make blue's decision less dependent on background (O9's calibration first), then red with
-more backgrounds per candidate (each one costs ~10 s of GPU time).
+**Update**: with thresholds calibrated on 14,000 calm seconds (L8), red's #2 and #3 (scan over
+900 s, exfiltration over 1600 s) reach progress 0.94 against both blues on backgrounds 7001-7003:
+caught only late in exfiltration. On the earlier thresholds they reached 0.68.
+**Update 2**: on 20 fresh backgrounds (9001-9020) the picture is clear. With the 60 s history, red
+progress was 0.60, 0.83, 0.83 for red's best three and 0.53 for the baseline (50 of 80 caught);
+with E10, 0.58, 0.79, 0.79 and 0.33 (44 of 80). Red's slow scan is a real evasion (O12): 5 seeds
+(8001-8005) had suggested E10 fixed it (0.84 → 0.52), and that too was luck.
+**Next**: fix O12, then rerun red with ~10 backgrounds per candidate (`FLYSOC_BIN` in
+`tools/red.py` runs any build).
 **Lesson**: an optimiser finds the noise in its fitness function. Score on several draws, and
 re-check winners on draws they never saw.
+
+### O12. Low-and-slow scans evade rule D because the single fly drowns them (P4)
+**Symptom**: on 20 fresh backgrounds (seeds 9001-9020), red's #2 and #3 (37 ports over 900 s,
+exfiltration over 1600 s) reach kill-chain progress 0.79: usually never caught. With the 15-minute
+counts of E10, the network fly does see the slow scan: its evidence peaks at 1.5x its threshold
+during recon in 12 of 12 replays (backgrounds 7001-7003, `data/runs/two/o9_peaks_new.txt`). The
+single fly crosses its threshold in only 5 of 12, and rule D needs the single fly
+(`docs/red_vs_blue.png`, right).
+**Cause, as far as we can tell**: the single fly smells all four kinds, ~40 events a second. A
+scan event every 24 s is one smell in a thousand; its evidence (a 20 s average of MBON spikes) is
+dominated by the volume of everything else.
+**Next**: let a specialist that is far above its threshold and names an entity raise an incident
+with a second specialist (rule A already does, at +191 s on the final set), or weigh flies by how
+far above threshold they are, chosen on the eval set and checked against red.
+
 
 ---
 
@@ -397,6 +409,53 @@ and the single fly's slowness there was fixed by L7. Phase 2 moved from 1/502 to
 **Lesson**: tuning on one random draw of a hash tunes on that draw. Vary the seed before trusting a
 result.
 
+### E10. History over one minute could not see low-and-slow attacks (P4, was open issue O11)
+**Symptom**: blue retrained on red's 3 best intrusions (`red.py harden`) did no better against
+them than the original blue (8/12 caught each, L8). Red's #2 and #3 scan 37 ports over 900 s and
+spread exfiltration over 1600 s.
+**First guess, wrong**: learning only depresses Kenyon cell → MBON synapses in safe windows, and
+attack windows only restore weights toward their start (L5), so already-novel smells teach blue
+nothing. Letting attack windows potentiate up to a cap changed nothing beyond noise. Rule D on the
+eval set and the harden duel (original vs retrained blue, replays caught of 12):
+
+| attack windows | eval D first alert, look-alikes, false s | duel |
+|---|---|---|
+| restore to start (current) | +88 s, 22/50, 0 | 8 vs 8 |
+| potentiate to 1.5x | +86 s, 22/50, 0 | - |
+| potentiate to 2x | +86 s, 23/50, 0 | 7 vs 7 |
+| potentiate to 4x | +74 s, 24/50, 0 | 8 vs 7 |
+| only synapses not depressed, to 1x | +88 s, 22/50, 0 | 7 vs 7 |
+| only synapses not depressed, to 4x | +86 s, 22/50, 0 | 8 vs 7 |
+
+Raw scorecards in `data/runs/cap/`.
+**Cause**: every history count looked back 60 s. One port every 24 s is 2-3 distinct ports a
+minute, like any workstation; ~8 exfiltration names a minute is below what benign CDN traffic
+shows (21). The smells were the same as benign ones, so no learning rule could separate them.
+Over 15 minutes benign counts barely grow (at most 6 ports per workstation, 1 failed user per
+source, 30 names per domain, in `cluster_calib.jsonl`), while the slow stages pile up (37 ports,
+~114 names).
+**Tried**: one longer window for ports, failed users and DNS names. 300 s: eval rule D +210 s, 2
+false seconds; 900 s: +443 s, 4 false seconds (from +88 s, 0). Slow genomes improved (0.84 → 0.70
+at 900 s on 5 backgrounds), fast intrusions got slower: one window cannot serve both.
+**Fix**: both windows. Ports, failed users and DNS names get a 60 s and a 15-minute component
+(`LONG_HISTORY_S` in `detect.rs`, `name_long=bucket`), each in its own ordinal code of 10 reserved
+glomeruli (`HISTORY_GLOMERULI_TWO_CODES`). Processes keep only 60 s: benign hosts cycle through
+all their processes within minutes. The first version gave every fly 20 reserved glomeruli, which
+cost the processes-only endpoint fly field glomeruli for nothing (3/10 caught, 117 false seconds
+on the eval set); it now keeps one code of 13 and is back to exactly 5/10, 20. Suspects use the
+15-minute count.
+**Result**: eval set, rule D: +87 s, 23/50, 0 false seconds (was +88 s, 22/50, 0). Final set: +89 s
+(was +360 s), 8 of 10 caught during the scan (was 5), 20/50 look-alikes (was 19), 2 false seconds
+(was 0). Against red on 20 fresh backgrounds, mean progress 0.58, 0.79, 0.79, 0.33 instead of 0.60,
+0.83, 0.83, 0.53: the baseline-paced intrusion is caught much earlier, but red's slow scan still
+gets through (O12). The harden duel stays even (O11's symptom remains: 4 vs 5 of 12 on 7001-7003,
+15 vs 15 of 20 on 8001-8005), which is expected while O12 hides the slow scan from rule D.
+**Cost**: Phase 2's port-scan test lost its learning gain. Trained, the fly now catches 36/40 scan
+windows 1 s in with 3/502 false alerts, like the untrained fly (was 40/40, 0 s, 2/502). That test is
+saturated: the untrained fly already catches every scan within 1 s.
+**Lesson**: when learning cannot separate two things, check whether the input can. Also, 5
+backgrounds were not enough to judge red: they said this fixed the slow scan, 20 said it did not.
+
 ---
 
 ## Solved: circuit and learning
@@ -465,7 +524,49 @@ calm second set the bar for the whole run, and the bar grows with the length of 
 | 99th | +55 s | 30/50 | 7 |
 
 Chosen on the eval set. On the final set D went from +354 s to +94 s, still with 0 false seconds.
-It did not fix O9, which it was meant for.
+It did not fix O9 (now L8), which it was meant for.
+
+### L8. Thresholds depended on which benign bursts the training file contained (P3, P4; was open issue O9)
+**Symptom**: blue retrained on the training file plus red's 3 best intrusions (`red.py harden`,
+2400 s → 11,600 s of training) caught fewer of red's intrusions than the original blue: 7/12
+against 10/12, replayed into 3 backgrounds neither had seen. The first guess, that the maximum
+grows with file length, was wrong: the 99.9th percentile (L7) gave the same result.
+**Cause**: found with `tools/o9.py`, which prints every fly's threshold and its peak evidence per
+stage (raw output in `data/runs/o9_peaks.txt`). The identity fly's threshold rose from 28.2 to
+47.5, and with it spray detection fell from 10/12 to 6/12, while its evidence on red's stages
+barely moved. The new threshold came from seconds 8259-8270 of the hardened file: a random cluster
+of 9 ordinary logins in 3 s, which drove the identity fly to 300 MBON spikes/s. The original blue
+responds to that same burst just as strongly (evidence 49.3 vs 51.8), so this was calibration, not
+learning. Only 2,855 of the hardened file's seconds were calm (red's slow stages make most of it
+unsafe), and the original file had ~1,700: the 99.9th percentile was the 2nd or 3rd highest second,
+and so depended on which rare bursts a file happened to contain. The original blue's low threshold
+was luck; it would false-alarm on such a burst.
+**Tried, no help**: divisive gain control, scoring MBON spikes per Kenyon cell spike instead of per
+second (MBON output scales with Kenyon input at a near-constant ~0.25 for one login and for the
+burst). Offline on the eval set, false-alarm seconds stayed the same or rose for every fly at every
+offset tried, and endpoint caught 6-7/10 either way: dividing removes signal along with volume.
+**Fix**: thresholds are set on the calm seconds of the training replay plus a calibration replay
+of `data/telemetry/cluster_calib.jsonl` (12,000 s of benign traffic with every look-alike 6 times,
+written by `tools/gen_intrusion.py`): ~14,000 calm seconds (`CALIBRATION` in `cluster.rs`, part of
+the cache key). With more calm seconds the quantile was chosen again on the eval set, rule D:
+
+| calm quantile | median first alert | look-alikes | false s |
+|---|---|---|---|
+| 99th | +64 s | 26/50 | 0 |
+| **99.5th (chosen)** | +88 s | 22/50 | 0 |
+| 99.8th | +107 s | 20/50 | 0 |
+| 99.9th | +372 s | 19/50 | 0 |
+| 99.95th | +612 s | 17/50 | 0 |
+
+99.5th is clear of the cliff between 99.8th and 99.9th, and about 70 calm seconds lie above it, so
+no single burst moves it. Raw scorecards in `data/runs/calib/`.
+**Result**: the harden duel now comes out equal (8/12 both; then E10). Final set, rule D: 10/10, 19/50
+look-alikes (was 22), 0 false seconds, median first alert +360 s (was +94 s). The medians are
+bimodal: each intrusion is caught during the scan (+20 to +117 s) or at exfiltration (~+610 s);
+D catches 5/10 early on the final set and 9/10 on the eval set. Calibration adds ~77 s to the
+first run of a training file.
+**Lesson**: a high quantile of a small sample is just one of its largest values. Count how many
+samples lie above a threshold before trusting it.
 
 ---
 

@@ -1,7 +1,7 @@
 """Synthetic multi-domain telemetry with a multi-stage intrusion and benign look-alikes.
 
 Run: python3 tools/gen_intrusion.py
-Writes data/telemetry/cluster_{baseline,train,test,holdout}.jsonl. Every event has a `kind`:
+Writes data/telemetry/cluster_{baseline,calib,train,test,holdout}.jsonl and the eval/final sets. Every event has a `kind`:
   conn  src dst dport          network
   auth  user src dst result    identity (result: ok | fail)
   proc  host process parent    endpoint
@@ -160,6 +160,11 @@ def random_times(rng):
 if __name__ == "__main__":
     os.makedirs("data/telemetry", exist_ok=True)
     write("data/telemetry/cluster_baseline.jsonl", scenario(10, 300, [], []))
+    # Calibration: 12000 s of benign traffic with every look-alike 6 times. Thresholds are set on
+    # calm seconds of the training replay plus this file, so they do not hang on whichever rare
+    # benign burst one training file happens to contain (ISSUES L8).
+    crng = random.Random(41 * 7919)
+    write("data/telemetry/cluster_calib.jsonl", scenario(41, 12000, [], [(w, crng.randrange(50, 11880)) for w in ALL for _ in range(6)]))
     write("data/telemetry/cluster_train.jsonl",
           scenario(11, 2400, [100, 1300], [(w, 900 + 60 * k) for k, w in enumerate(ALL)] + [(w, 2100 - 50 * k) for k, w in enumerate(ALL)]))
     write("data/telemetry/cluster_test.jsonl",

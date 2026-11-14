@@ -35,12 +35,17 @@ in `tools/` (fictional hosts and users). Real data is the next big step.
 - Phase 0, done: watch a whole fly brain think.
 - Phase 1, done: logs are encoded into smells, and a pruned smell circuit of the fly responds to them.
 - Phase 2, done on synthetic data: the mushroom body learns from labels. On held-out data, trained
-  flies catch every port scan from second 0 and ignore legitimate bursts.
+  flies catch every port scan within 1 s and ignore legitimate bursts.
 - Phase 3, met on precision, not on speed: four specialist flies, a single fly that smells
   everything, and a coordinator that links alarms by host or user. On 10 held-out intrusions, the
-  default rule (the team confirms the single fly) catches 10/10 at a median +94 s, with no
-  false-alarm seconds, like the single fly alone (see Phase 3).
-- Phase 4, started: red vs blue evolution (`tools/red.py`).
+  default rule (the team confirms the single fly) catches 10/10 at a median +89 s: 8 during the
+  scan, within 2 minutes, 2 only at exfiltration, about 10 minutes in. It alerts on 20 of 50
+  look-alikes and on 2 seconds of plain traffic (see Phase 3).
+- Phase 4, in progress: red vs blue evolution (`tools/red.py`). Red found a real evasion, a
+  low-and-slow scan. Blue answered with 15-minute history counts (E10): the network fly now sees
+  every slow scan, but the default rule still waits for the single fly, which does not (O12).
+- Phase 5, next: Lean 4 proofs of detection properties of the trained output circuits. The first
+  statements are under [The mathematics](#lean-4-what-phase-5-will-prove).
 
 Every problem we hit, its cause and its fix is logged in [docs/ISSUES.md](docs/ISSUES.md), with the
 open issues first.
@@ -63,6 +68,7 @@ curl -L -o annotations.tsv https://github.com/flyconnectome/flywire_annotations/
 cd ../.. && uv run tools/convert.py
 python3 tools/gen_traffic.py    # port scan telemetry -> data/telemetry/
 python3 tools/gen_intrusion.py  # multi-stage intrusion telemetry -> data/telemetry/cluster_*
+                                #   (cluster_calib.jsonl: benign traffic for the cluster's thresholds)
                                 #   (train, test, holdout, and 5+5 files for choosing / reporting)
 
 cargo run --release            # whole-brain viewer
@@ -83,7 +89,8 @@ lateral horn local neurons (LHLN). Training takes a few seconds and is not saved
 `cluster <labelled> <events>` trains the four specialists and the single fly, then prints one JSON
 incident per alerted second (with confidence and the flies that agree) to stdout, and a scorecard
 for every fly and the cluster to stderr. The trained cluster is cached in `data/cache/`, keyed on the
-training file and the FlySOC binary: the first run trains (about 36 s), later runs load it at once
+training file, the calibration file and the FlySOC binary: the first run trains and calibrates
+(about 2 minutes: 19 s training, 96 s calibration replays), later runs load it at once
 and only play the events (about 17 s for 2400 s of telemetry).
 
 `watch <labelled> <events>` trains the cluster the same way (or loads it from the cache), then plays
@@ -102,7 +109,7 @@ second offscreen, without a window, as a 1920x1080 PPM image. This is how `docs/
 this page) was made: second 1010 of the holdout, the first intrusion's DNS exfiltration, with the
 DNS fly and the single fly red.
 
-`FLYSOC_TRACE=<file>` writes every fly's per-second MBON spikes as TSV.
+`FLYSOC_TRACE=<file>` writes every fly's per-second MBON and Kenyon cell spikes as TSV.
 
 Viewer: drag to orbit, scroll to zoom, Space to pause, R to silence all neurons, +/- to change speed.
 Keys 1-9 and 0 toggle 150 Hz Poisson input into every 10th neuron of a super class, in this order:
@@ -145,27 +152,32 @@ give different Kenyon cell patterns (cosine similarity 0.13, up from 0.93 in the
 
 ## Encoding
 
-Each event is an "odour" made of components: one per field, plus one summary of recent history.
-Each field component hashes to 2 of 40 olfactory glomeruli, so an event activates a combination of
-glomeruli, as real odours do. The other 13 of the 53 glomeruli are reserved for history, like the
-dedicated glomeruli real flies have for innately important smells. A history value in bucket b lights
-reserved glomeruli b to b+3, so similar magnitudes overlap and very different ones never do. The event's receptor neurons fire a
-puff: 5 spikes 4 ms apart, like a real odour response. One second of telemetry plays as 50 ms of fly
-time.
+Each event is an "odour" made of components: one per field, plus summaries of recent history.
+Each field component hashes to 2 of the glomeruli left for fields, so an event activates a
+combination of glomeruli, as real odours do. The rest of the 53 glomeruli are reserved for history,
+like the dedicated glomeruli real flies have for innately important smells. A history value in
+bucket b lights reserved glomeruli b to b+3 of its code, so similar magnitudes overlap and very
+different ones never do. Fan-out counts (ports, failed users, DNS names) come twice: over the last
+60 s and over the last 15 minutes, each with its own code of 10 glomeruli (33 left for fields).
+Process counts only use the last minute, so the endpoint fly keeps one code of 13 (40 for fields).
+The event's receptor neurons fire a puff: 5 spikes 4 ms apart, like a real odour response. One
+second of telemetry plays as 50 ms of fly time.
 
-| kind | field components | history component (distinct values in the last 60 s, bucketed by powers of two) |
+| kind | field components | history components (distinct values in the last 60 s and 15 min, bucketed by powers of two) |
 |---|---|---|
-| conn | source, destination port | ports this source touched |
-| auth | user, source, destination, result | users that failed to log in from this source |
-| proc | host, process, parent | processes started on this host |
-| dns | host, base domain, length of the first label / 8 | names this host looked up under this base domain |
+| conn | source, destination port | ports this source touched (60 s, 15 min) |
+| auth | user, source, destination, result | users that failed to log in from this source (60 s, 15 min) |
+| proc | host, process, parent | processes started on this host (60 s) |
+| dns | host, base domain, length of the first label / 8 | names this host looked up under this base domain (60 s, 15 min) |
 
 History components exist because attacks like scans and sprays are patterns across events: each
 failed login of a password spray looks like an ordinary typo. They get 4 glomeruli instead of 2,
 otherwise the event's own fields drown them out (spray and typo then still looked alike). They get
 glomeruli of their own because, when they shared the hash with fields, results depended on which
 fields they happened to collide with: other hash seeds had 8 to 229 false-alarm seconds where ours
-had 0 (ISSUES E9).
+had 0 (ISSUES E9). The 15-minute counts came from red vs blue: red's best intrusions scanned one
+port every 24 s and spread exfiltration over half an hour, which looks like any workstation within
+a minute (ISSUES E10).
 
 Four things were needed to make this work:
 - A single synchronous receptor spike barely reaches the Kenyon cells: about 2 Kenyon spikes per
@@ -195,6 +207,161 @@ coincidence with dopamine, not on spike order.
 
 The readout is MBON spikes per second. An alert fires above max(benign mean + 4σ, 20 spikes).
 
+## The mathematics
+
+What the code computes, written down. Symbols match the constants in `src/`. Every equation here
+is implemented exactly as written. Shiu et al.'s are marked; the rest are ours.
+
+### Neurons (Shiu et al. 2024, `sim.wgsl`)
+
+Leaky integrate-and-fire with conductance-like synaptic input. Voltage $v_i$ is measured from rest
+($-52$ mV), so reset is $0$ and threshold $\vartheta = 7$ mV. Explicit Euler with
+$\Delta t = 0.1$ ms:
+
+```math
+\begin{aligned}
+v_i &\leftarrow v_i + \frac{\Delta t}{\tau_m}\bigl(g_i - v_i - a_i\bigr) \quad\text{unless } t - t_i^{\text{last}} < t_{\text{ref}}\\
+g_i &\leftarrow g_i\Bigl(1 - \frac{\Delta t}{\tau_s}\Bigr) + w_{\text{syn}} \sum_{j} W_{ji}\,\bigl|\{\,k : t_j^{k} + d = t\,\}\bigr| + w_{\text{syn}}\,u_i(t)\\
+a_i &\leftarrow a_i\Bigl(1 - \frac{\Delta t}{\tau_a}\Bigr), \qquad
+v_i > \vartheta \;\Rightarrow\; v_i \leftarrow 0,\; a_i \leftarrow a_i + A,\; t_i^{\text{last}} \leftarrow t
+\end{aligned}
+```
+
+with $\tau_m = 20$ ms, $\tau_s = 5$ ms, $w_{\text{syn}} = 0.275$ mV, $d = 1.8$ ms,
+$t_{\text{ref}} = 2.2$ ms. $W_{ji}$ is the signed synapse count from $j$ to $i$ (sign from the
+predicted transmitter); the delay ring adds it up in sixteenths of a synapse so small learned
+weight changes register. $u_i(t)$ is input: 250 synapses' worth for a receptor neuron an event
+fires (enough to fire it from rest). The adaptation $a_i$
+($A = 10$ mV, $\tau_a = 1$ s) is ours and only used for the whole brain; the circuits run with
+$A = 0$, which is Shiu et al.'s model unchanged.
+
+Each connection is one 32-bit word: the target in the low 19 bits, the signed count in the high
+13 (S16):
+
+```math
+s_{ji} = i \;\big|\; \bigl(W_{ji} \bmod 2^{13}\bigr) \ll 19, \qquad i < 2^{19} = 524{,}288,\quad |W_{ji}| \le 2405 < 2^{12}
+```
+
+### Odours (`detect.rs`)
+
+A history count is the number of distinct values $x$ (ports, users, names, processes) recorded
+under a key $k$ (a source, a host, a host and domain) in the last $T$ seconds:
+
+```math
+n_T(k, t) = \bigl|\{\, x : (\tau, x) \in H_k,\; t - T \le \tau \le t \,\}\bigr|,
+\qquad b(n) = \begin{cases} 0 & n = 0 \\ \lfloor \log_2 n \rfloor + 1 & n \ge 1 \end{cases}
+```
+
+with $T \in \{60, 900\}$ s (processes: 60 only). Bucket $b$ lights four neighbouring glomeruli
+of its code, which starts at offset $o$ and has $S$ glomeruli:
+
+```math
+G_{o,S}(b) = \bigl\{\, o + \min(b + k,\; S - 1) \;:\; k = 0, 1, 2, 3 \,\bigr\}
+```
+
+So magnitudes that are close share glomeruli and distant ones share none: away from the cap,
+$|G(b) \cap G(b')| = \max(0,\, 4 - |b - b'|)$. Since $n_{60} \le n_{900}$ and $b$ is monotone,
+an event's long bucket is never below its short one. A slow scan is the case
+$b(n_{60}) \approx b_{\text{benign}} < b(n_{900})$.
+
+### Learning (Hige et al. 2015, `MushroomBody::learn`)
+
+Kenyon cell → MBON weights start at $w^0 = 16 \times$ synapse count. Once per telemetry second,
+with $\alpha_j$ the spikes of synapse $j$'s Kenyon cell in that second:
+
+```math
+w_j \leftarrow w_j + \rho\,(w^0_j - w_j), \qquad
+w_j \leftarrow \begin{cases}
+w_j\,(1 - \eta_{\text{safe}})^{\alpha_j} & \text{safe second, } \alpha_j > 0 \\
+w^0_j + (w_j - w^0_j)\,(1 - \eta_{\text{rec}})^{\alpha_j} & \text{attack second, } \alpha_j > 0
+\end{cases}
+```
+
+with $\rho = 0.002$, $\eta_{\text{safe}} = 0.1$, $\eta_{\text{rec}} = 0.05$. Every step is a
+convex combination toward $w^0_j$ or a shrink toward $0$, so $0 < w_j \le w^0_j$ always: learning
+can only teach what is safe (E10 tried letting attack seconds push $w$ above $w^0$; it did not
+help).
+
+### Alarms (`cluster.rs`)
+
+A fly's evidence is an exponential average of its MBON spikes $m_t$ per second, and it fires
+above a quantile of its evidence on calm seconds $C$ (training seconds after the first 60 that
+are not within 60 s after an intrusion event, plus every calibration second after the first 60):
+
+```math
+E_t = E_{t-1} + \frac{m_t - E_{t-1}}{20}, \qquad
+\theta = Q_{0.995}\bigl(\{E_t : t \in C\}\bigr), \qquad
+\text{fire}_t \iff t \ge 2 \;\wedge\; E_t > \theta
+```
+
+where $Q_q$ of $N$ sorted values is the one at index $\operatorname{round}\bigl((N-1)\,q\bigr)$.
+With $|C| \approx 14{,}000$, about 70 calm seconds lie above $\theta$ (L8). Rule D raises an
+incident about entity $e$ when the single fly fires now naming $e$, and some specialist fired
+within $300$ s naming $e$ too:
+
+```math
+\text{incident}_t(e) \iff \text{fire}^{\text{single}}_t \;\wedge\; e \in S^{\text{single}}_t \;\wedge\;
+\exists f \in \text{specialists},\; \exists t' \in [t - 300, t] : \text{fire}^{f}_{t'} \wedge e \in S^{f}_{t'}
+```
+
+### Red's fitness (`red.py`)
+
+With $\delta$ the delay from the intrusion's start $T_0$ to the first incident (and $P = 1$ if
+there is none), red's progress is the mean, over its four stages, of the share of the stage's
+events that happened before it:
+
+```math
+P = \frac{1}{4} \sum_{s \in \{\text{recon},\,\text{spray},\,\text{lateral},\,\text{exfil}\}}
+\frac{\bigl|\{\, e \in s : t_e < T_0 + \delta \,\}\bigr|}{|s|}
+```
+
+Red runs a $(\mu + \lambda)$ evolution, $\mu = \lambda = 4$, scored as the mean of $P$ over 3
+shared fresh backgrounds per generation.
+
+### Lean 4: what Phase 5 will prove
+
+These are the statements, in Lean 4 with Mathlib, of properties the encoding and learning above
+should have. **They are not proved yet, and nothing here has been checked by Lean:** every
+`sorry` is a proof Phase 5 still owes.
+
+```lean
+import Mathlib
+
+namespace FlySOC
+
+/-- Power-of-two bucket of a count: `usize::BITS - n.leading_zeros()` in `History::observe`. -/
+def bucket (n : ℕ) : ℕ := if n = 0 then 0 else Nat.log2 n + 1
+
+/-- Reserved glomeruli lit by bucket `b` in an ordinal code of `size` glomeruli at offset `o`. -/
+def code (o size b : ℕ) : Finset ℕ :=
+  (Finset.range 4).image fun k => o + min (b + k) (size - 1)
+
+/-- More distinct values never mean a lower bucket. -/
+theorem bucket_mono {m n : ℕ} (h : m ≤ n) : bucket m ≤ bucket n := by
+  sorry
+
+/-- Away from the cap, buckets four or more apart light disjoint glomeruli. -/
+theorem code_disjoint {o size b b' : ℕ} (hcap : b' + 3 < size) (h : b + 4 ≤ b') :
+    Disjoint (code o size b) (code o size b') := by
+  sorry
+
+/-- One second of the three-factor rule on one synapse. -/
+noncomputable def learn (ρ ηs ηr w0 w : ℝ) (α : ℕ) (safe : Bool) : ℝ :=
+  let w := w + ρ * (w0 - w)
+  if α = 0 then w
+  else if safe then w * (1 - ηs) ^ α
+  else w0 + (w - w0) * (1 - ηr) ^ α
+
+/-- Learning never makes a synapse stronger than it started, nor silences it. -/
+theorem learn_bounded {ρ ηs ηr w0 w : ℝ} {α : ℕ} {safe : Bool}
+    (hρ : 0 ≤ ρ ∧ ρ ≤ 1) (hs : 0 ≤ ηs ∧ ηs < 1) (hr : 0 ≤ ηr ∧ ηr ≤ 1)
+    (hw : 0 < w ∧ w ≤ w0) :
+    0 < learn ρ ηs ηr w0 w α safe ∧ learn ρ ηs ηr w0 w α safe ≤ w0 := by
+  sorry
+
+end FlySOC
+```
+
 ## Results: port scans (Phase 2)
 
 Trained on `train.jsonl` (seed 5). Settings were tuned on `test.jsonl` (seed 2) and are reported here
@@ -203,13 +370,16 @@ on `holdout.jsonl` (seed 7, other incident times), which was never used for tuni
 
 | Holdout, 600 s | Untrained | Trained |
 |---|---|---|
-| 4 port scans, 100 conn/s to 1000 ports | 4/4 caught, 36/40 windows, 1 s in | 4/4 caught, 40/40 windows, 0 s in |
+| 4 port scans, 100 conn/s to 1000 ports | 4/4 caught, 36/40 windows, 1 s in | 4/4 caught, 36/40 windows, 1 s in |
 | 4 backup bursts, 100 conn/s to one port | 0/4 (0/40 windows) | 0/4 (0/40 windows) |
-| benign-only windows | 0/502 false alerts | 2/502 false alerts |
+| benign-only windows | 0/502 false alerts | 3/502 false alerts |
 
 With the field-wise encoding, the backup host and SMB port are already familiar parts of the odour,
-so even the untrained fly no longer alerts on bursts. Learning makes scans fire sooner and in every
-window.
+so even the untrained fly no longer alerts on bursts. This test is now saturated: the untrained fly
+already catches every scan within 1 s, so learning has nothing left to show here. (With the
+60-second history only, learning made scans fire in every window, 40/40 at 0 s in, with 2/502 false
+alerts; the 15-minute counts of E10 cost that, see E10. Learning's effect shows in Phase 3, where
+the flies are trained against look-alikes.)
 
 ## Phase 3: cluster
 
@@ -233,9 +403,11 @@ about as long as one.
 How a fly fires:
 - Its evidence is its MBON spikes per second, averaged over about 20 s, because stages last minutes
   and single seconds are noisy.
-- After training, it replays its training data without learning. From then on it fires only above
-  the 99.9th percentile of the evidence it showed on safe training seconds, look-alikes included.
-  (The maximum, used at first, hung on a single outlier second; ISSUES L7.)
+- After training, it replays its training data and `cluster_calib.jsonl` (12,000 s of benign
+  traffic with every look-alike 6 times) without learning. From then on it fires only above the
+  99.5th percentile of the evidence it showed on these ~14,000 calm seconds. (The maximum, used at
+  first, hung on a single outlier second, L7; calm seconds of the training file alone were too few,
+  and the threshold depended on which rare benign bursts it happened to contain, L8.)
 
 The coordinator links alarms by entity. Each fly names its suspects: the entities behind its most
 extreme history count in the last 20 s (the source fanning out over ports, the source failing many
@@ -262,42 +434,50 @@ Look-alikes are benign activity, so alerting on one is a false positive: lower i
 
 | final set | intrusions caught ↑ | median first alert ↓ | look-alikes alerted ↓ | false alert seconds ↓ |
 |---|---|---|---|---|
-| network fly | 10/10 | **+40 s** | 19/50 | 279/2549 |
-| identity fly | 10/10 | +254 s | 20/50 | 17/2549 |
-| endpoint fly | 8/10 | +202 s | 15/50 | 33/2549 |
-| DNS fly | 10/10 | +234 s | 23/50 | 21/2549 |
-| single fly | 10/10 | +94 s | 25/50 | **0/2549** |
-| A team | 10/10 | +253 s | **19/50** | 18/2549 |
-| B team or single | 10/10 | +90 s | 33/50 | 18/2549 |
-| C all vote | 10/10 | +90 s | 35/50 | 18/2549 |
-| **D confirmed** | **10/10** | +94 s | 22/50 | **0/2549** |
+| network fly | 10/10 | **+34 s** | 23/50 | 253/2549 |
+| identity fly | 10/10 | +259 s | 19/50 | **0/2549** |
+| endpoint fly | 6/10 | +248 s | **11/50** | 28/2549 |
+| DNS fly | 10/10 | +610 s | 14/50 | **0/2549** |
+| single fly | 10/10 | +78 s | 21/50 | 2/2549 |
+| A team | 10/10 | +191 s | 27/50 | 2/2549 |
+| B team or single | 10/10 | +53 s | 32/50 | 4/2549 |
+| C all vote | 10/10 | +53 s | 37/50 | 4/2549 |
+| **D confirmed** | **10/10** | +89 s | 20/50 | 2/2549 |
 
-(Before E9 and the 99.9% threshold, the same set gave D +137 s, 20/50, 16 false seconds, and the
-single fly +102 s, 23/50, 46. Both changes were chosen on the eval set.)
+The medians hide that first alerts come in two groups. Each intrusion is caught either during the
+scan (+47 to +114 s for D here) or only when exfiltration starts (about +625 s). Rule D catches 8 of
+10 in the first group on this set. With 10 intrusions, a median only says which side of 5 that count
+falls on: with the 60-second history only, D caught 5 early here, and its median was +360 s.
 
-**Verdict.** Every rule catches all 10 intrusions. D and the single fly alert at a median +94 s and
-never alarm on plain traffic. D now matches the single fly rather than beating it: the team's
-confirmation costs no time any more, and saves 3 look-alike alerts (22 vs 25, within noise).
-B and C are no faster and alarm on 18 seconds of plain traffic. The network fly alone sees every scan
-within a minute, but alarms for 279 seconds. With 50 look-alikes, differences of a few alerts are
-within noise.
+(Earlier versions of the same set: D +137 s, 20/50, 16 false seconds before E9; D +94 s, 22/50, 0
+with thresholds from the training file alone, which L8 showed were set too low by luck; D +360 s,
+19/50, 0 before the 15-minute counts of E10. All changes were chosen on the eval set or against
+red.)
+
+**Verdict.** Every rule catches all 10 intrusions. D alerts at a median +89 s, on 20 look-alikes and
+2 seconds of plain traffic. The single fly alone is a little faster (+78 s) with about the same
+false alarms (21/50, 2 s): the team's confirmation still does not clearly pay (O1). B and C are the
+fastest rules but alert on 32-37 look-alikes. The network fly alone sees every scan within a minute,
+but alarms for 253 seconds. With 50 look-alikes, differences of a few alerts are within noise.
 
 What each specialist can and cannot see:
 - **DNS** catches every exfiltration, but late: exfiltration is the last stage.
 - **Network** sees every slow scan and is the fastest, but is also the noisiest on plain traffic
-  (279 false seconds).
+  (253 false seconds).
 - **Identity** catches every password spray. Spray and typo differ only in the history component.
 - **Endpoint** catches lateral movement, but cannot tell an attacker's psexec from an admin's.
 
 What it took (all in [docs/ISSUES.md](docs/ISSUES.md)): history components so the specialists can see
 their stage (E7, E8), entity correlation against unrelated look-alikes (M8), bigger evaluation
-sets (M9), and history glomeruli of their own (E9).
+sets (M9), history glomeruli of their own (E9), and thresholds calibrated on enough calm traffic
+(L7, L8).
 
 **More flies.** `FLYSOC_REPLICAS=R` gives every role R individual flies: the same circuit, but each
 feature lands on different glomeruli (`Encoder::individual`). Their output spikes are summed into one
 voter per role, so the coordinator still sees five roles. Extra flies are cheap, because the GPU is
 bound by dispatches, not neurons. 50 flies play 2417 s in 58 s in `watch` (one row per role, one
-column per individual). Eval set (cluster_eval_21-25), rule D:
+column per individual). Eval set (cluster_eval_21-25), rule D, measured before the calibration
+file of L8 (thresholds from the training file alone):
 
 | flies | median first alert ↓ | look-alikes alerted ↓ | false alert seconds ↓ | train + 5 files |
 |---|---|---|---|---|
@@ -322,31 +502,54 @@ Open directions for Phase 3: per-entity learning from look-alike labels, a coord
 how much to trust each fly, and above all real data (O4) before drawing conclusions from one
 synthetic scenario.
 
-## Phase 4: red vs blue (started)
+## Phase 4: red vs blue
 
 `tools/red.py` evolves the Phase 3 intrusion against the trained cluster. Red's genome is the pace
 and size of each stage: ports scanned and over how long, accounts sprayed, servers reached, gaps
 between stages, and how the 6000 hex chars of stolen data are split into DNS labels and spread out.
 Every stage must still do its real job (ATT&CK T1046, T1110.003, T1021.002 + T1569.002, T1048): at
-least 10 ports, at least 5 accounts, the whole payload. Red's score is its progress through the kill
-chain before rule D raises an incident: per stage, the share of its events before the first
-incident, averaged (1.0 = never caught). `python3 tools/red.py evolve <train> <out>` runs it, and
-`harden` retrains blue on red's best and replays both against them.
+least 10 ports, at least 5 accounts, the whole payload. Red's fitness is its kill-chain progress
+$P$ before rule D raises an incident (defined under [The mathematics](#the-mathematics)).
+`python3 tools/red.py evolve <train> <out>` runs it, and `harden` retrains blue on red's best and
+replays both against them. `FLYSOC_BIN=<binary>` plays against any build of blue.
 
-First results, on backgrounds neither side had seen:
+What happened, round by round:
 
-| intrusion | red progress (mean of 5 backgrounds) |
-|---|---|
-| unchanged Phase 3 intrusion | 0.66 |
-| red's 3 best after 6 generations | 0.43, 0.68, 0.68 |
-| only exfiltration slowed to 1000 s | 0.65 |
-| only the spray slowed to 490 s | 0.42 |
-| only the scan slowed to 900 s | 0.64 |
+1. **Red's first winners were luck.** Scored on one background each, 19 of 64 candidates were
+   "never caught"; replayed into fresh backgrounds they were caught 11 times in 12 (O10). Red now
+   scores every candidate on the same 3 fresh backgrounds per generation.
+2. **Blue's retraining backfired, then didn't.** Blue retrained on red's 3 best caught fewer of
+   them (7/12 vs 10/12). The cause was calibration: the longer training file contained one rare
+   burst of ordinary logins, which raised the identity fly's threshold from 28 to 47. Thresholds
+   now rest on ~14,000 calm seconds (L8, graph below), and both blues tie.
+3. **Learning could not help, because the smells were identical.** Red's #2 and #3 scan one port
+   every 24 s and spread exfiltration over 27 minutes. Counted over 60 s, that is what every
+   workstation looks like. Four potentiation rules for attack windows changed nothing (E10).
+4. **Blue's answer: a second timescale.** Fan-out counts now also look back 15 minutes, in their
+   own ordinal code (E10). The baseline-paced intrusion is caught much earlier, and the final set
+   improved from a median +360 s to +89 s.
+5. **Red's slow scan still gets through (O12).** On 20 fresh backgrounds the network fly sees it,
+   but rule D needs the single fly, which smells ~40 events a second and drowns one scan event in
+   24 s.
 
-Red has not yet found a real evasion. Its "undetected" winners were lucky backgrounds: when blue
-fires depends more on the surrounding traffic than on the attack's pace (O10). (This table predates
-the 99.9% threshold of L7.) Blue, retrained on red's best, got worse: 7 of 12 replays caught
-instead of 10, with either threshold. Why is open issue O9.
+![Red vs blue on 20 fresh backgrounds](docs/red_vs_blue.png)
+
+Left: red's mean progress on 20 backgrounds neither side had seen (seeds 9001-9020; 80 replays per
+encoding, 50 caught before E10, 44 after). Right: on backgrounds 7001-7003, how often each fly's
+evidence crosses its threshold during red's recon stage.
+
+| intrusion (20 fresh backgrounds) | red progress, 60 s history | with 15-minute counts |
+|---|---|---|
+| red's #1 | 0.60 | 0.58 |
+| red's #2 (scan over 900 s, exfiltration over 1600 s) | 0.83 | 0.79 |
+| red's #3 (as #2, 8 accounts sprayed) | 0.83 | 0.79 |
+| unchanged Phase 3 intrusion | 0.53 | **0.33** |
+
+![Threshold calibration](docs/calibration.png)
+
+The quantile sweep behind L8 (eval set, rule D, measured before E10): every quantile keeps 0
+false-alarm seconds, and the median first alert falls off a cliff between the 99.8th and 99.9th
+percentile. `tools/phase4_plots.py` redraws both graphs.
 
 ## Memory
 
@@ -371,7 +574,8 @@ enabling GL as well loads the OpenGL and Mesa drivers too.
 | `tools/convert.py` | FlyWire export → `data/fly.bin` |
 | `tools/gen_traffic.py`, `tools/gen_intrusion.py` | Synthetic telemetry with labelled attacks and benign look-alikes |
 | `tools/red.py` | Phase 4 red team: evolves the intrusion, retrains blue |
-| `tools/scorecards.py`, `tools/flies_roi.py` | Scorecard aggregation and the fly-count graph |
+| `tools/scorecards.py`, `tools/flies_roi.py`, `tools/phase4_plots.py` | Scorecard aggregation and the graphs in `docs/` |
+| `tools/o9.py` | Per-fly, per-stage evidence against thresholds on red's replays (L8, O12) |
 | `docs/ISSUES.md` | Every problem, its cause and fix |
 
 ## Credits
