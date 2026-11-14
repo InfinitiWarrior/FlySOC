@@ -294,7 +294,7 @@ E_t = E_{t-1} + \frac{m_t - E_{t-1}}{20}, \qquad
 \text{fire}_t \iff t \ge 2 \;\wedge\; E_t > \theta
 ```
 
-where $Q_q$ of $N$ sorted values is the one at index $\operatorname{round}\bigl((N-1)\,q\bigr)$.
+where $Q_q$ of $N$ sorted values is the one at index $\mathrm{round}\bigl((N-1)\,q\bigr)$.
 With $|C| \approx 14{,}000$, about 70 calm seconds lie above $\theta$ (L8). Rule D raises an
 incident about entity $e$ when the single fly fires now naming $e$, and some specialist fired
 within $300$ s naming $e$ too:
