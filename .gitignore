@@ -1,0 +1,7 @@
+/target
+# downloaded connectome, converted brain, generated telemetry, caches and run logs: all regenerable (see README)
+/data
+__pycache__/
+*.ppm
+# assistant instructions, not part of the project
+CLAUDE.md
