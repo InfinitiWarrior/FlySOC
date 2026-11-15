@@ -332,7 +332,7 @@ $x$ on the same $B = 8$ fresh backgrounds $\beta_{g,1}, \dots, \beta_{g,B}$ and 
 
 ```math
 \bar P_g(x) = \frac{1}{B} \sum_{b=1}^{B} P(x, \beta_{g,b}), \qquad
-x \in \prod_{k} [\ell_k, u_k] \ \text{(the ATT&CK-faithful bounds below)}
+x \in \prod_{k} [\ell_k, u_k] \ \text{(the ATT\&CK-faithful bounds below)}
 ```
 
 A winner is only reported after replaying it on backgrounds no generation used.
