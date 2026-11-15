@@ -160,16 +160,30 @@ pub enum Rule {
     AllVote,
     /// The single fly fires and at least one specialist agrees: the team confirms the generalist.
     Confirmed,
+    /// `Confirmed`, or a specialist at STRONG x its threshold that another fly agrees with: a
+    /// specialist that is sure can stand in for the single fly, which drowns slow attacks in the
+    /// volume of everything else it smells (ISSUES O12).
+    ConfirmedOrStrong,
 }
 
-pub const RULES: [(Rule, &str); 4] = [
+/// How far above its threshold a specialist must be to stand in for the single fly. Chosen on the
+/// eval set and red's backgrounds 9001-9020; alone, without a second fly, even 3x gave 65
+/// false-alarm seconds on the eval set (ISSUES O12).
+const STRONG: f64 = 1.5;
+
+pub const RULES: [(Rule, &str); 5] = [
     (Rule::Team, "A team"),
     (Rule::TeamOrSingle, "B team|single"),
     (Rule::AllVote, "C all vote"),
     (Rule::Confirmed, "D confirmed"),
+    (Rule::ConfirmedOrStrong, "E D|strong pair"),
 ];
-/// The rule `watch` and the JSON incidents use.
+/// The rule for incidents in `watch` and the JSON output.
 pub const RULE: Rule = Rule::Confirmed;
+/// The rule for leads: alarms below incident level that RULE does not raise. A lead is a strong
+/// specialist with a second fly agreeing, the shape of a low-and-slow attack the single fly drowns
+/// (ISSUES O12). It costs a few more look-alike alerts, so it is a separate, lower tier.
+pub const LEAD: Rule = Rule::ConfirmedOrStrong;
 
 /// Turns each second's MBON spikes and suspects per fly into fly alarms, one second at a time,
 /// and answers whether a `Rule` raises an incident.
@@ -197,6 +211,13 @@ impl Coordinator {
         now
     }
 
+    /// The alert of second `s`, if any: ("incident" by RULE, else "lead" by LEAD), confidence and
+    /// entity. Call after `second`.
+    pub fn alert(&self, s: usize, now: &[bool], suspects: &[Vec<String>]) -> Option<(&'static str, f32, String)> {
+        let tier = |kind: &'static str, rule| self.incident(s, now, suspects, rule).map(|(c, e)| (kind, c, e));
+        tier("incident", RULE).or_else(|| tier("lead", LEAD))
+    }
+
     /// The incident `rule` raises in second `s`, if any: (confidence, entity). Call after `second`.
     pub fn incident(&self, s: usize, now: &[bool], suspects: &[Vec<String>], rule: Rule) -> Option<(f32, String)> {
         let single = SPECIALISTS;
@@ -220,6 +241,10 @@ impl Coordinator {
             }),
             Rule::AllVote => quorum(&all, &all),
             Rule::Confirmed => quorum(&all, &[single]),
+            Rule::ConfirmedOrStrong => {
+                let strong: Vec<usize> = (0..SPECIALISTS).filter(|&f| now[f] && self.ema[f] >= STRONG * self.thresholds[f]).collect();
+                quorum(&all, &[single]).or_else(|| quorum(&all, &strong))
+            }
         }
     }
 }
@@ -247,10 +272,10 @@ pub fn run(fly: &Fly, syn: Synapses, train: &str, events: &str) -> Result<(), St
         for (r, (rule, _)) in RULES.iter().enumerate() {
             cluster[r][s] = coord.incident(s, &now, &suspects, *rule).is_some();
         }
-        if let Some((confidence, entity)) = coord.incident(s, &now, &suspects, RULE) {
+        if let Some((kind, confidence, entity)) = coord.alert(s, &now, &suspects) {
             let truth: Vec<&String> = labels[s].iter().filter(|l| *l != "benign").collect();
             let who: Vec<&str> = (0..SPECIALISTS).filter(|&f| now[f]).map(|f| FLIES[f].0).collect();
-            println!(r#"{{"ts_start":{s},"ts_end":{},"kind":"incident","entity":"{entity}","confidence":{confidence:.2},"flies":{who:?},"truth":{truth:?}}}"#, s + 1);
+            println!(r#"{{"ts_start":{s},"ts_end":{},"kind":"{kind}","entity":"{entity}","confidence":{confidence:.2},"flies":{who:?},"truth":{truth:?}}}"#, s + 1);
         }
     }
     if let Ok(path) = std::env::var("FLYSOC_TRACE") {
@@ -371,7 +396,7 @@ pub struct Watch {
     coord: Coordinator,
     now: usize,
     alarm: u32,
-    incident: Option<(f32, String)>, // confidence, entity
+    incident: Option<(&'static str, f32, String)>, // tier, confidence, entity
     logged: String, // last terminal log line, minus the time
     loop_started: Option<std::time::Instant>,
 }
@@ -425,7 +450,10 @@ impl Watch {
             "happening: {}  |  red: {}  |  {}",
             self.happening(self.now),
             if red.is_empty() { "none".into() } else { red.join(", ") },
-            self.incident.as_ref().map_or("no incident".into(), |(c, e)| format!("CLUSTER INCIDENT about {e}, {:.0}% of specialists agree", c * 100.0)),
+            self.incident.as_ref().map_or("no incident".into(), |(kind, c, e)| match *kind {
+                "incident" => format!("CLUSTER INCIDENT about {e}, {:.0}% of flies agree", c * 100.0),
+                _ => format!("lead (strong specialist + 1) about {e}, {:.0}% of flies agree", c * 100.0),
+            }),
         )
     }
 
@@ -530,7 +558,7 @@ impl Driver for Watch {
             let mbon: Vec<u32> = windows.iter().map(|w| w.spikes[detect::DETECT_ON]).collect();
             let suspects: Vec<Vec<String>> = windows.into_iter().map(|w| w.suspects).collect();
             let now = self.coord.second(s, &mbon, &suspects);
-            let incident = self.coord.incident(s, &now, &suspects, RULE);
+            let incident = self.coord.alert(s, &now, &suspects);
             self.alarm = now.iter().enumerate().fold(0, |m, (f, &x)| m | (x as u32) << f);
             (self.now, self.incident) = (s, incident);
             let line = self.describe();

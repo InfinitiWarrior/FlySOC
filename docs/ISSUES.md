@@ -66,12 +66,13 @@ caught only late in exfiltration. On the earlier thresholds they reached 0.68.
 progress was 0.60, 0.83, 0.83 for red's best three and 0.53 for the baseline (50 of 80 caught);
 with E10, 0.58, 0.79, 0.79 and 0.33 (44 of 80). Red's slow scan is a real evasion (O12): 5 seeds
 (8001-8005) had suggested E10 fixed it (0.84 → 0.52), and that too was luck.
-**Next**: fix O12, then rerun red with ~10 backgrounds per candidate (`FLYSOC_BIN` in
-`tools/red.py` runs any build).
+**Update 3**: red now scores each candidate on 8 backgrounds per generation (`BACKGROUNDS`,
+`PARALLEL` = 8). The noise is no longer what it finds: its winners hold up on unseen backgrounds
+(O13).
 **Lesson**: an optimiser finds the noise in its fitness function. Score on several draws, and
 re-check winners on draws they never saw.
 
-### O12. Low-and-slow scans evade rule D because the single fly drowns them (P4)
+### O12. Low-and-slow scans evade rule D because the single fly drowns them (P4; partly fixed by leads)
 **Symptom**: on 20 fresh backgrounds (seeds 9001-9020), red's #2 and #3 (37 ports over 900 s,
 exfiltration over 1600 s) reach kill-chain progress 0.79: usually never caught. With the 15-minute
 counts of E10, the network fly does see the slow scan: its evidence peaks at 1.5x its threshold
@@ -81,10 +82,51 @@ single fly crosses its threshold in only 5 of 12, and rule D needs the single fl
 **Cause, as far as we can tell**: the single fly smells all four kinds, ~40 events a second. A
 scan event every 24 s is one smell in a thousand; its evidence (a 20 s average of MBON spikes) is
 dominated by the volume of everything else.
-**Next**: let a specialist that is far above its threshold and names an entity raise an incident
-with a second specialist (rule A already does, at +191 s on the final set), or weigh flies by how
-far above threshold they are, chosen on the eval set and checked against red.
+**Tried**: a specialist at $\kappa$ times its threshold standing in for the single fly
+(`cluster.rs`, eval set, backgrounds 9001-9020 for red):
 
+| rule | eval: first alert, look-alikes, false s | red progress (9001-9020) |
+|---|---|---|
+| D (single fly + one specialist) | +87 s, 23/50, 0 | 0.58, 0.79, 0.79, 0.33 |
+| D or strong specialist alone, κ = 1.25 / 1.5 / 2 / 3 | +41 / +60 / +81 / +87 s, 35 / 33 / 25 / 23, **195 / 166 / 127 / 65** | - |
+| D or strong specialist + any other fly, κ = 1.25 | +74 s, 32/50, 3 | - |
+| D or strong specialist + any other fly, κ = 1.5 | +74 s, 30/50, 0 | 0.50, 0.54, 0.79, 0.27 |
+| D or strong specialist + any other fly, κ = 2 | +81 s, 25/50, 0 | 0.58, 0.76, 0.79, 0.33 |
+
+**Partial fix**: the paired rule at κ = 1.5 is rule E (`Rule::ConfirmedOrStrong`, `STRONG`). Its
+extra look-alike alerts (7 of 50 on the eval set) are too many to call incidents, so it is a second
+tier: `Coordinator::alert` returns an incident when D fires and a lead when only E does (JSON
+`"kind"`, and the `watch` status line). Reported on data not used to choose: final set, D 10/10 at
++89 s with 20/50 look-alikes and 2 false seconds; incidents plus leads 10/10 at +60 s, all within
+2 minutes, 24/50, 2. Red on backgrounds 9101-9120: progress 0.38, 0.51, 0.68, 0.36 against D's
+0.38, 0.70, 0.73, 0.49; 58 of 80 alerted instead of 52.
+**Still open**: red's #3 sprays only 8 accounts, too few for the identity fly, so nothing names the
+scanning workstation with the network fly and it reaches 0.68. Next: a lead from one specialist
+far above its threshold that stays there (sustained, not a single second), or a coordinator that
+learns how much to trust each fly.
+
+
+### O13. Red adapted to leads by slowing every stage at once (P4)
+**Symptom**: red evolved against rule E (incidents plus leads), 6 generations of 8, 8 backgrounds
+per candidate (`data/runs/red8/`, about 2 hours). Its best rose from 0.49 to 0.88. Replayed on 20
+backgrounds no generation used (9101-9120, `data/runs/red8/fresh.txt`):
+
+| genome | against D | against E |
+|---|---|---|
+| #1: 32 ports over 919 s, 15 accounts over 883 s, exfil over 1583 s | 0.84 | not run yet |
+| #2: 37 ports over 235 s, 15 accounts over 60 s, exfil over 1583 s | 0.82 | not run yet |
+| #3: 37 ports over 1263 s, 15 accounts over 60 s, exfil over 1583 s | 0.84 | not run yet |
+| unchanged Phase 3 intrusion | 0.49 | not run yet |
+| caught, of 80 replays | 35 | not run yet |
+
+The baseline's 0.49 against D matches the earlier run on the same backgrounds (O12), so the
+replays are consistent.
+**Likely cause, not yet measured**: leads need a second fly to agree about the same host within
+the evidence average's memory (about 60 s). When every stage is slow, the stages are minutes apart,
+so a specialist that is sure during one stage has no partner by the time the next starts.
+`tools/o9.py` on these replays will show the per-fly peaks and confirm or refute this.
+**Next**: the O12 remainder, a lead from one specialist that stays above its threshold (sustained
+over minutes, not one second), then evolve red against that.
 
 ---
 

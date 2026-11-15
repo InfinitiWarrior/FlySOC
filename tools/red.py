@@ -4,7 +4,7 @@ raises an incident, within limits that keep every stage doing its real job.
 Run: python3 tools/red.py evolve <train.jsonl> <out_dir> [generations] [population]
      python3 tools/red.py harden <train.jsonl> <out_dir> [k]   (see the bottom of this file)
 Needs a release build (target/release/flysoc, or the binary in FLYSOC_BIN). Each candidate intrusion is played into fresh
-background traffic and scored by `flysoc cluster` with the default rule (D, confirmed).
+background traffic and scored by `flysoc cluster` with rule FLYSOC_RULE (default D, confirmed).
 
 Genome (ATT&CK technique each stage stays faithful to):
   recon    T1046      ports to scan (>= 10, else it learns nothing) over recon_s seconds
@@ -27,8 +27,8 @@ BOUNDS = dict(ports=(10, 100), recon_s=(30, 1800), users=(5, 19), spray_s=(30, 1
               lateral_gap_s=(10, 600), label_len=(10, 60), exfil_s=(60, 1800), gap_s=(30, 600))
 INTS = {"ports", "users", "servers", "label_len"}
 START = 100  # the intrusion starts this long into its file
-BACKGROUNDS = 3  # fresh background traffic per candidate per generation
-PARALLEL = 4  # flysoc processes at once: the GPU is bound by launches, not throughput
+BACKGROUNDS = 8  # fresh background traffic per candidate per generation (3 was too few, ISSUES O10)
+PARALLEL = 8  # flysoc processes at once: the GPU is bound by launches, not throughput
 BIN = os.environ.get("FLYSOC_BIN", "./target/release/flysoc")  # e.g. a copy built with another encoding
 
 
@@ -86,7 +86,10 @@ def scenario(g, seed):
     return bg + atk, atk
 
 
-def first_alert(train, path, rule="cluster D confirmed"):
+RULE = os.environ.get("FLYSOC_RULE", "cluster D confirmed")  # the scorecard line red plays against
+
+
+def first_alert(train, path, rule=RULE):
     """Seconds from the intrusion's start to the rule's first incident, or None if never."""
     r = subprocess.run([BIN, "cluster", train, path], capture_output=True, text=True)
     for line in r.stderr.splitlines():
@@ -115,7 +118,7 @@ def progress(train, g, seed, workdir):
 def evolve(train, out, generations=6, population=8, seed=0):
     """(mu + lambda) evolution: keep the best half, refill with mutants. Every generation plays all
     candidates on the same BACKGROUNDS fresh background seeds and scores the mean, so they compete on
-    equal terms and one lucky background cannot make a winner (ISSUES M10)."""
+    equal terms and one lucky background cannot make a winner (ISSUES O10)."""
     rng = random.Random(seed)
     os.makedirs(out, exist_ok=True)
     # flysoc trains and caches the blue team on first use; do that once before going parallel

@@ -25,10 +25,13 @@ in `tools/` (fictional hosts and users). Real data is the next big step.
    output synapses of smells known to be safe. Afterwards, whatever still makes the output neurons
    fire is "not known to be safe".
 4. **Cluster.** Four specialist flies (network, identity, endpoint, DNS) and one generalist run
-   side by side in one simulation. A coordinator raises an incident when flies agree about the
-   same entity.
-5. **Red vs blue.** An evolutionary attacker varies the intrusion's pacing, within limits that keep
-   every stage a real attack, to find blind spots and harden the detector.
+   side by side in one simulation. A coordinator raises an incident when the generalist and a
+   specialist agree about the same entity, and a lower-tier lead when a specialist is far above
+   its threshold and another fly agrees.
+5. **Red vs blue.** Red is an evolutionary attacker (`tools/red.py`). It varies the intrusion's
+   pacing and size, within limits that keep every stage a real ATT&CK technique, and plays each
+   candidate against the real cluster on fresh background traffic. What it finds becomes blue's
+   next fix: so far a 15-minute memory (E10) and a second alert tier (O12).
 
 ## Status
 
@@ -42,8 +45,10 @@ in `tools/` (fictional hosts and users). Real data is the next big step.
   scan, within 2 minutes, 2 only at exfiltration, about 10 minutes in. It alerts on 20 of 50
   look-alikes and on 2 seconds of plain traffic (see Phase 3).
 - Phase 4, in progress: red vs blue evolution (`tools/red.py`). Red found a real evasion, a
-  low-and-slow scan. Blue answered with 15-minute history counts (E10): the network fly now sees
-  every slow scan, but the default rule still waits for the single fly, which does not (O12).
+  low-and-slow scan. Blue answered twice: 15-minute history counts (E10), and leads, a second alert
+  tier for a specialist that is sure of itself (O12). With leads, all 10 held-out intrusions raise
+  an alert within 2 minutes. Red then evolved against leads and found that slowing every stage
+  at once still gets through (O13): blue's next round.
 - Phase 5, next: Lean 4 proofs of detection properties of the trained output circuits. The first
   statements are under [The mathematics](#lean-4-what-phase-5-will-prove).
 
@@ -87,7 +92,8 @@ spike counts of projection neurons (ALPN), Kenyon cells, mushroom body output ne
 lateral horn local neurons (LHLN). Training takes a few seconds and is not saved yet.
 
 `cluster <labelled> <events>` trains the four specialists and the single fly, then prints one JSON
-incident per alerted second (with confidence and the flies that agree) to stdout, and a scorecard
+alert per alerted second to stdout, with its tier (`"kind":"incident"` by rule D, or `"lead"` by
+rule E where D is silent), confidence and the flies that agree, and a scorecard
 for every fly and the cluster to stderr. The trained cluster is cached in `data/cache/`, keyed on the
 training file, the calibration file and the FlySOC binary: the first run trains and calibrates
 (about 2 minutes: 19 s training, 96 s calibration replays), later runs load it at once
@@ -297,17 +303,23 @@ E_t = E_{t-1} + \frac{m_t - E_{t-1}}{20}, \qquad
 where $Q_q$ of $N$ sorted values is the one at index $\mathrm{round}\bigl((N-1)\,q\bigr)$.
 With $|C| \approx 14{,}000$, about 70 calm seconds lie above $\theta$ (L8). Rule D raises an
 incident about entity $e$ when the single fly fires now naming $e$, and some specialist fired
-within $300$ s naming $e$ too:
+within $300$ s naming $e$ too. Where it is silent, rule E raises a lead when a specialist is at
+least $\kappa = 1.5$ times over its threshold and any other fly agrees:
 
 ```math
-\text{incident}_t(e) \iff \text{fire}^{\text{single}}_t \;\wedge\; e \in S^{\text{single}}_t \;\wedge\;
-\exists f \in \text{specialists},\; \exists t' \in [t - 300, t] : \text{fire}^{f}_{t'} \wedge e \in S^{f}_{t'}
+\begin{aligned}
+\text{agree}_t(f, e) &\iff \text{fire}^{f}_t \wedge e \in S^{f}_t \;\wedge\;
+\exists g \ne f,\; \exists t' \in [t - 300, t] : \text{fire}^{g}_{t'} \wedge e \in S^{g}_{t'}\\
+\text{incident}_t(e) &\iff \text{agree}_t(\text{single}, e)\\
+\text{lead}_t(e) &\iff \neg\,\exists e'\,\text{incident}_t(e') \;\wedge\;
+\exists f \in \text{specialists} : E^{f}_t \ge \kappa\,\theta_f \;\wedge\; \text{agree}_t(f, e)
+\end{aligned}
 ```
 
 ### Red's fitness (`red.py`)
 
-With $\delta$ the delay from the intrusion's start $T_0$ to the first incident (and $P = 1$ if
-there is none), red's progress is the mean, over its four stages, of the share of the stage's
+With $\delta$ the delay from the intrusion's start $T_0$ to the first alert of the rule red plays
+against (and $P = 1$ if there is none), red's progress is the mean, over its four stages, of the share of the stage's
 events that happened before it:
 
 ```math
@@ -315,8 +327,15 @@ P = \frac{1}{4} \sum_{s \in \{\text{recon},\,\text{spray},\,\text{lateral},\,\te
 \frac{\bigl|\{\, e \in s : t_e < T_0 + \delta \,\}\bigr|}{|s|}
 ```
 
-Red runs a $(\mu + \lambda)$ evolution, $\mu = \lambda = 4$, scored as the mean of $P$ over 3
-shared fresh backgrounds per generation.
+Red runs a $(\mu + \lambda)$ evolution, $\mu = \lambda = 4$. Generation $g$ scores every genome
+$x$ on the same $B = 8$ fresh backgrounds $\beta_{g,1}, \dots, \beta_{g,B}$ and ranks by
+
+```math
+\bar P_g(x) = \frac{1}{B} \sum_{b=1}^{B} P(x, \beta_{g,b}), \qquad
+x \in \prod_{k} [\ell_k, u_k] \ \text{(the ATT&CK-faithful bounds below)}
+```
+
+A winner is only reported after replaying it on backgrounds no generation used.
 
 ### Lean 4: what Phase 5 will prove
 
@@ -414,14 +433,16 @@ extreme history count in the last 20 s (the source fanning out over ports, the s
 users, the host with many new processes, the host sending many names to one domain). Stages of one
 intrusion share entities: the scan and the spray come from the same workstation against the same
 server, and exfiltration leaves from a server reached by lateral movement. Unrelated look-alikes
-rarely share one. `cluster` scores four rules for raising an incident. Each needs 2 flies that fired
+rarely share one. `cluster` scores five rules for raising an alert. Each needs 2 flies that fired
 within 300 s to agree about the same entity, except where noted:
 
 - **A team**: 2 of the 4 specialists agree.
 - **B team or single**: the single fly fires alone, or A.
 - **C all vote**: 2 of all 5 flies agree.
-- **D confirmed** (the default, used by `watch` and the JSON output): the single fly fires and at
-  least one specialist agrees with it.
+- **D confirmed** (incidents in `watch` and the JSON output): the single fly fires and at least one
+  specialist agrees with it.
+- **E D or strong pair** (leads, where D is silent): D, or a specialist whose evidence is at least
+  1.5x its threshold fires and another fly agrees with it (O12).
 
 **Evaluation.** One file of 2 intrusions and 10 look-alikes turned out far too small: the rule that
 won on `cluster_test` lost on `cluster_holdout`. So there are two sets of 5 files with random timings,
@@ -442,12 +463,14 @@ Look-alikes are benign activity, so alerting on one is a false positive: lower i
 | A team | 10/10 | +191 s | 27/50 | 2/2549 |
 | B team or single | 10/10 | +53 s | 32/50 | 4/2549 |
 | C all vote | 10/10 | +53 s | 37/50 | 4/2549 |
-| **D confirmed** | **10/10** | +89 s | 20/50 | 2/2549 |
+| **D confirmed** (incidents) | **10/10** | +89 s | **20/50** | 2/2549 |
+| **E D or strong pair** (incidents + leads) | **10/10** | +60 s | 24/50 | 2/2549 |
 
 The medians hide that first alerts come in two groups. Each intrusion is caught either during the
 scan (+47 to +114 s for D here) or only when exfiltration starts (about +625 s). Rule D catches 8 of
-10 in the first group on this set. With 10 intrusions, a median only says which side of 5 that count
-falls on: with the 60-second history only, D caught 5 early here, and its median was +360 s.
+10 in the first group on this set; with leads, all 10 alert within 2 minutes (+35 to +114 s). With
+10 intrusions, a median only says which side of 5 that count falls on: with the 60-second history
+only, D caught 5 early here, and its median was +360 s.
 
 (Earlier versions of the same set: D +137 s, 20/50, 16 false seconds before E9; D +94 s, 22/50, 0
 with thresholds from the training file alone, which L8 showed were set too low by luck; D +360 s,
@@ -457,7 +480,9 @@ red.)
 **Verdict.** Every rule catches all 10 intrusions. D alerts at a median +89 s, on 20 look-alikes and
 2 seconds of plain traffic. The single fly alone is a little faster (+78 s) with about the same
 false alarms (21/50, 2 s): the team's confirmation still does not clearly pay (O1). B and C are the
-fastest rules but alert on 32-37 look-alikes. The network fly alone sees every scan within a minute,
+fastest rules but alert on 32-37 look-alikes. Leads (E) catch every intrusion early for 4 more
+look-alike alerts (7 more on the eval set), which is why they are a separate, lower tier rather than
+incidents. The network fly alone sees every scan within a minute,
 but alarms for 253 seconds. With 50 look-alikes, differences of a few alerts are within noise.
 
 What each specialist can and cannot see:
@@ -504,20 +529,40 @@ synthetic scenario.
 
 ## Phase 4: red vs blue
 
-`tools/red.py` evolves the Phase 3 intrusion against the trained cluster. Red's genome is the pace
-and size of each stage: ports scanned and over how long, accounts sprayed, servers reached, gaps
-between stages, and how the 6000 hex chars of stolen data are split into DNS labels and spread out.
-Every stage must still do its real job (ATT&CK T1046, T1110.003, T1021.002 + T1569.002, T1048): at
-least 10 ports, at least 5 accounts, the whole payload. Red's fitness is its kill-chain progress
-$P$ before rule D raises an incident (defined under [The mathematics](#the-mathematics)).
-`python3 tools/red.py evolve <train> <out>` runs it, and `harden` retrains blue on red's best and
-replays both against them. `FLYSOC_BIN=<binary>` plays against any build of blue.
+Blue is the cluster of Phase 3. Red is `tools/red.py`, an evolutionary attacker. It never touches
+the flies: it can only decide *how* to run the intrusion, and every candidate is played into fresh
+background traffic and scored by the real `flysoc cluster` binary. Its job is to find what blue
+cannot see, so that blue can be fixed. It found two real blind spots so far (O12, O13).
+
+**Red's genome** is the pace and size of the four kill-chain stages. The bounds keep every stage
+doing its real ATT&CK job, so red cannot "win" by not attacking:
+
+| stage | technique | genes and bounds | why the floor |
+|---|---|---|---|
+| recon | T1046 network service discovery | 10-100 ports, over 30-1800 s | fewer than 10 ports finds nothing |
+| spray | T1110.003 password spraying | 5-19 accounts, over 30-1800 s, then one success | fewer than 5 is guessing, not spraying |
+| lateral | T1021.002 SMB shares + T1569.002 service execution | psexec into 1-3 servers the victim never used, 10-600 s apart | at least one hop |
+| exfil | T1048 exfiltration over DNS | all 6000 hex chars, in labels of 10-60 chars, over 60-1800 s | the whole payload must leave |
+| between stages | | 30-600 s gaps | |
+
+**Red's loop**: 8 candidates per generation, each played on the same 8 fresh backgrounds (64
+`flysoc` runs, 8 at a time on one GPU). Red keeps the best 4 by mean kill-chain progress $P$
+(defined under [The mathematics](#reds-fitness-redpy)) and refills with mutants: 1-3 genes each,
+scaled by 0.5-2x or redrawn. Six generations take about 2 hours on an RTX 4090. Winners are then
+replayed on 20 backgrounds no generation used (9101-9120), and only those numbers are reported.
+
+```sh
+python3 tools/red.py evolve data/telemetry/cluster_train.jsonl data/runs/red8 6 8   # red evolves
+python3 tools/red.py harden data/telemetry/cluster_train.jsonl data/runs/red8 3     # blue retrains on red's best
+FLYSOC_RULE="cluster E D|strong pair" python3 tools/red.py evolve ...                # play against another rule
+FLYSOC_BIN=<binary> python3 tools/red.py evolve ...                                   # or another build of blue
+```
 
 What happened, round by round:
 
 1. **Red's first winners were luck.** Scored on one background each, 19 of 64 candidates were
    "never caught"; replayed into fresh backgrounds they were caught 11 times in 12 (O10). Red now
-   scores every candidate on the same 3 fresh backgrounds per generation.
+   scores every candidate on the same fresh backgrounds per generation (3, now 8).
 2. **Blue's retraining backfired, then didn't.** Blue retrained on red's 3 best caught fewer of
    them (7/12 vs 10/12). The cause was calibration: the longer training file contained one rare
    burst of ordinary logins, which raised the identity fly's threshold from 28 to 47. Thresholds
@@ -528,9 +573,22 @@ What happened, round by round:
 4. **Blue's answer: a second timescale.** Fan-out counts now also look back 15 minutes, in their
    own ordinal code (E10). The baseline-paced intrusion is caught much earlier, and the final set
    improved from a median +360 s to +89 s.
-5. **Red's slow scan still gets through (O12).** On 20 fresh backgrounds the network fly sees it,
-   but rule D needs the single fly, which smells ~40 events a second and drowns one scan event in
-   24 s.
+5. **The single fly drowned the slow scan (O12).** On 20 fresh backgrounds the network fly sees
+   it, but rule D needs the single fly, which smells ~40 events a second and drowns one scan
+   event in 24 s.
+6. **Blue's second answer: leads.** A specialist at 1.5x its threshold with a second fly agreeing
+   raises a lead, a lower alert tier (rule E). Alone, without a second fly, even 3x gave 65
+   false-alarm seconds on the eval set. Against red on 20 more fresh backgrounds (9101-9120, not
+   used to choose), red's progress falls to 0.38, 0.51, 0.68, 0.36 from 0.38, 0.70, 0.73, 0.49,
+   and 58 of 80 replays alert instead of 52. Red's #3 still mostly gets through: it sprays only 8
+   accounts, too few for the identity fly, so no second fly names the scanning workstation.
+7. **Red adapted to leads (O13).** Evolved against rule E on 8 backgrounds per candidate, red's best
+   rose from 0.49 to 0.88 in six generations. Its winners spread every slow stage out at once: 32-37
+   ports over 4-21 minutes, exfiltration over 26 minutes, and the top one also sprays 15 accounts
+   over 15 minutes. On 20 unseen backgrounds (9101-9120) they reach 0.84, 0.82, 0.84 against rule D
+   (caught 35 of 80 replays, baseline included); the replay against rule E is still to run. Blue's next answer is
+   the O12 remainder: a lead that needs no second fly when one specialist *stays* above its
+   threshold.
 
 ![Red vs blue on 20 fresh backgrounds](docs/red_vs_blue.png)
 
