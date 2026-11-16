@@ -42,15 +42,18 @@ in `tools/` (fictional hosts and users). Real data is the next big step.
 - Phase 3, met on precision, not on speed: four specialist flies, a single fly that smells
   everything, and a coordinator that links alarms by host or user. On 10 held-out intrusions, the
   default rule (the team confirms the single fly) catches 10/10 at a median +89 s: 8 during the
-  scan, within 2 minutes, 2 only at exfiltration, about 10 minutes in. It alerts on 20 of 50
-  look-alikes and on 2 seconds of plain traffic (see Phase 3).
+  scan, within 2 minutes, 2 only at exfiltration, about 10 minutes in. Scored as an analyst's
+  queue, 79% of its 43 alerts are about an intrusion; the rest are the authorised scanner (5) and
+  alerts about nothing labelled (4) (see [Phase 3](#phase-3-cluster)).
 - Phase 4, in progress: red vs blue evolution (`tools/red.py`). Red found a real evasion, a
   low-and-slow scan. Blue answered twice: 15-minute history counts (E10), and leads, a second alert
   tier for a specialist that is sure of itself (O12). With leads, all 10 held-out intrusions raise
-  an alert within 2 minutes. Red then evolved against leads and found that slowing every stage
-  at once still gets through (O13): blue's next round.
-- Phase 5, next: Lean 4 proofs of detection properties of the trained output circuits. The first
-  statements are under [The mathematics](#lean-4-what-phase-5-will-prove).
+  an alert within 2 minutes. Red then evolved against leads: slowing every stage at once, spray
+  included, still reaches 0.84 of the kill chain on unseen backgrounds (O13): blue's next round.
+- Phase 5, in progress: Lean 4 proofs, checked with no `sorry`, of the encoding, the learning rule
+  and the coordinator: weights stay in $(0, w^0]$ over any training run, and no single fly can
+  raise an incident or a lead ([Lean 4](#lean-4-what-is-proved-phase-5)). Still to come:
+  properties of a trained circuit.
 
 Every problem we hit, its cause and its fix is logged in [docs/ISSUES.md](docs/ISSUES.md), with the
 open issues first.
@@ -59,6 +62,8 @@ open issues first.
 
 - A Vulkan-capable GPU (developed on an RTX 4090; one process uses about 210 MiB of GPU memory).
 - Rust (edition 2024), Python 3 and [uv](https://docs.astral.sh/uv/) for the data conversion.
+- Optional, for the proofs: Lean 4 via [elan](https://github.com/leanprover/elan) (about 3 GB in
+  `~/.elan`, plus about 7 GB of Mathlib cache in `proofs/.lake`).
 - About 500 MB of disk for the connectome download, the converted brain and generated telemetry.
   None of it is in the repository: `data/` is rebuilt by the commands below.
 
@@ -337,11 +342,29 @@ x \in \prod_{k} [\ell_k, u_k] \ \text{(the ATT\&CK-faithful bounds below)}
 
 A winner is only reported after replaying it on backgrounds no generation used.
 
-### Lean 4: what Phase 5 will prove
+### Lean 4: what is proved (Phase 5)
 
-These are the statements, in Lean 4 with Mathlib, of properties the encoding and learning above
-should have. **They are not proved yet, and nothing here has been checked by Lean:** every
-`sorry` is a proof Phase 5 still owes.
+Everything below is checked by Lean 4.35.0 with Mathlib (`proofs/FlySOC.lean`, no `sorry`, and
+`#print axioms` lists only Lean's standard `propext`, `Classical.choice` and `Quot.sound`):
+
+| theorem | says |
+|---|---|
+| `bucket_mono`, `long_bucket_ge_short` | more distinct values never mean a lower bucket, so $b(n_{60}) \le b(n_{900})$ |
+| `code_eq_Ico`, `code_disjoint`, `code_overlap` | below the cap a code is 4 consecutive glomeruli, and $\lvert G(b) \cap G(b')\rvert = \max(0,\, 4 - \lvert b - b'\rvert)$ |
+| `learn_bounded`, `train_bounded` | every learning step, and so every training run of any length, keeps $0 < w_j \le w^0_j$ |
+| `incident_is_alert` | every incident (rule D) is also a rule E alert: leads only ever add |
+| `alert_corroborated` | no fly can raise an incident or a lead alone: two different flies named the entity |
+| `teamOrSingle_uncorroborated` | rule B lacks that property (a counterexample) |
+| `lead_has_strong_specialist` | a lead that is not an incident has a specialist at $\kappa = 1.5$ times its threshold |
+
+What the proofs do **not** cover: the weights are real numbers, while `MushroomBody::learn` runs
+in `f32` (rounding is not modelled); the coordinator is modelled one second at a time, from which
+flies fire and whom they name, not from the spiking network that decides that; and nothing yet is
+proved about a *trained* circuit's behaviour on particular inputs.
+
+```sh
+cd proofs && lake exe cache get && lake build   # ~7 GB of Mathlib build cache in proofs/.lake
+```
 
 ```lean
 import Mathlib
@@ -351,20 +374,51 @@ namespace FlySOC
 /-- Power-of-two bucket of a count: `usize::BITS - n.leading_zeros()` in `History::observe`. -/
 def bucket (n : ℕ) : ℕ := if n = 0 then 0 else Nat.log2 n + 1
 
-/-- Reserved glomeruli lit by bucket `b` in an ordinal code of `size` glomeruli at offset `o`. -/
+/-- Reserved glomeruli lit by bucket `b` in an ordinal code of `size` glomeruli at offset `o`:
+`offset + (bucket + k).min(size - 1)` for `k < GLOMERULI_PER_HISTORY = 4` in `detect.rs`. -/
 def code (o size b : ℕ) : Finset ℕ :=
   (Finset.range 4).image fun k => o + min (b + k) (size - 1)
 
 /-- More distinct values never mean a lower bucket. -/
 theorem bucket_mono {m n : ℕ} (h : m ≤ n) : bucket m ≤ bucket n := by
-  sorry
+  unfold bucket
+  split_ifs with hm hn
+  · exact le_rfl
+  · omega
+  · omega
+  · simp only [Nat.log2_eq_log_two]
+    exact Nat.add_le_add_right (Nat.log_mono_right h) 1
+
+/-- The 15-minute count covers the 1-minute one, so an event's long bucket is never below its
+short bucket (`History::distinct` returns both). -/
+theorem long_bucket_ge_short {short long : ℕ} (h : short ≤ long) : bucket short ≤ bucket long :=
+  bucket_mono h
 
 /-- Away from the cap, buckets four or more apart light disjoint glomeruli. -/
 theorem code_disjoint {o size b b' : ℕ} (hcap : b' + 3 < size) (h : b + 4 ≤ b') :
     Disjoint (code o size b) (code o size b') := by
-  sorry
+  rw [Finset.disjoint_left]
+  simp only [code, Finset.mem_image, Finset.mem_range]
+  rintro _ ⟨k, hk, rfl⟩ ⟨k', hk', he⟩
+  omega
 
-/-- One second of the three-factor rule on one synapse. -/
+/-- Away from the cap, a code is four consecutive glomeruli. -/
+theorem code_eq_Ico {o size b : ℕ} (hcap : b + 3 < size) :
+    code o size b = Finset.Ico (o + b) (o + b + 4) := by
+  ext g
+  simp only [code, Finset.mem_image, Finset.mem_range, Finset.mem_Ico]
+  constructor
+  · rintro ⟨k, hk, rfl⟩; omega
+  · intro hg; exact ⟨g - (o + b), by omega, by omega⟩
+
+/-- Close magnitudes share glomeruli, in proportion to how close they are:
+`|G(b) ∩ G(b')| = max(0, 4 - |b - b'|)` (written with truncated subtraction). -/
+theorem code_overlap {o size b b' : ℕ} (hb : b + 3 < size) (hb' : b' + 3 < size) :
+    (code o size b ∩ code o size b').card = 4 - (max b b' - min b b') := by
+  rw [code_eq_Ico hb, code_eq_Ico hb', Finset.Ico_inter_Ico, Nat.card_Ico]
+  omega
+
+/-- One second of the three-factor rule on one synapse (`MushroomBody::learn`). -/
 noncomputable def learn (ρ ηs ηr w0 w : ℝ) (α : ℕ) (safe : Bool) : ℝ :=
   let w := w + ρ * (w0 - w)
   if α = 0 then w
@@ -376,7 +430,108 @@ theorem learn_bounded {ρ ηs ηr w0 w : ℝ} {α : ℕ} {safe : Bool}
     (hρ : 0 ≤ ρ ∧ ρ ≤ 1) (hs : 0 ≤ ηs ∧ ηs < 1) (hr : 0 ≤ ηr ∧ ηr ≤ 1)
     (hw : 0 < w ∧ w ≤ w0) :
     0 < learn ρ ηs ηr w0 w α safe ∧ learn ρ ηs ηr w0 w α safe ≤ w0 := by
-  sorry
+  obtain ⟨hρ0, hρ1⟩ := hρ
+  obtain ⟨hw0, hww⟩ := hw
+  -- after recovery, w₁ = (1 - ρ) w + ρ w0 lies in (0, w0]
+  have h1 : 0 < w + ρ * (w0 - w) := by nlinarith
+  have h2 : w + ρ * (w0 - w) ≤ w0 := by nlinarith
+  unfold learn
+  split_ifs with hα hsafe
+  · exact ⟨h1, h2⟩
+  · have hc : 0 < (1 - ηs) ^ α := pow_pos (by linarith [hs.2]) α
+    have hc1 : (1 - ηs) ^ α ≤ 1 := pow_le_one₀ (by linarith [hs.2]) (by linarith [hs.1])
+    exact ⟨mul_pos h1 hc, by nlinarith⟩
+  · have hc : 0 ≤ (1 - ηr) ^ α := pow_nonneg (by linarith [hr.2]) α
+    have hc1 : (1 - ηr) ^ α ≤ 1 := pow_le_one₀ (by linarith [hr.2]) (by linarith [hr.1])
+    constructor <;> nlinarith
+
+/-- So a whole training run keeps every weight in (0, w0]: induction over the seconds. -/
+theorem train_bounded {ρ ηs ηr w0 : ℝ}
+    (hρ : 0 ≤ ρ ∧ ρ ≤ 1) (hs : 0 ≤ ηs ∧ ηs < 1) (hr : 0 ≤ ηr ∧ ηr ≤ 1) (hw0 : 0 < w0)
+    (seconds : List (ℕ × Bool)) :
+    let w := seconds.foldl (fun w s => learn ρ ηs ηr w0 w s.1 s.2) w0
+    0 < w ∧ w ≤ w0 := by
+  suffices ∀ (l : List (ℕ × Bool)) (w : ℝ), 0 < w ∧ w ≤ w0 →
+      let w' := l.foldl (fun w s => learn ρ ηs ηr w0 w s.1 s.2) w; 0 < w' ∧ w' ≤ w0 from
+    this seconds w0 ⟨hw0, le_rfl⟩
+  intro l
+  induction l with
+  | nil => intro w hw; exact hw
+  | cons s l ih => intro w hw; exact ih _ (learn_bounded hρ hs hr hw)
+
+/-! ## The coordinator (`Coordinator::incident` in `cluster.rs`)
+
+One second of the cluster, abstracted from the spikes: which of the five flies fire now (fly 4
+is the single fly), who each names, the entities each named when it last fired within
+`HORIZON_S`, and which specialists are at `STRONG` times their threshold. -/
+
+/-- The cluster's state in one second; `α` is the type of entities (hosts, users). -/
+structure Second (α : Type) where
+  now : Fin 5 → Bool
+  suspects : Fin 5 → Finset α
+  recent : Fin 5 → Finset α
+  strong : Fin 5 → Bool
+
+variable {α : Type} [DecidableEq α]
+
+def single : Fin 5 := 4
+def specialists : Finset (Fin 5) := {0, 1, 2, 3}
+
+/-- How many flies recently named `e` (`voters.iter().filter(..).count()`). -/
+def votes (x : Second α) (e : α) : ℕ := (Finset.univ.filter fun g => e ∈ x.recent g).card
+
+/-- `quorum(&all, from)`: a fly of `from` firing now names an entity that `QUORUM = 2` flies
+agree about. Rust takes the best-supported entity (`max_by_key`); some entity reaching the
+quorum is the same condition. -/
+def quorum (x : Second α) (src : Finset (Fin 5)) : Prop :=
+  ∃ f ∈ src, x.now f ∧ ∃ e ∈ x.suspects f, 2 ≤ votes x e
+
+/-- Rule D, incidents. -/
+def confirmed (x : Second α) : Prop := quorum x {single}
+
+/-- Rule E, incidents and leads. -/
+def confirmedOrStrong (x : Second α) : Prop :=
+  confirmed x ∨ quorum x (specialists.filter fun f => x.now f ∧ x.strong f)
+
+/-- Rule B, team or the single fly alone. -/
+def teamOrSingle (x : Second α) : Prop := quorum x specialists ∨ x.now single = true
+
+/-- Two different flies recently named the same entity. -/
+def corroborated (x : Second α) : Prop :=
+  ∃ e g g', g ≠ g' ∧ e ∈ x.recent g ∧ e ∈ x.recent g'
+
+/-- Every incident is also raised by the lead rule, so leads only ever add alerts. -/
+theorem incident_is_alert {x : Second α} (h : confirmed x) : confirmedOrStrong x := Or.inl h
+
+lemma quorum_corroborated {x : Second α} {src : Finset (Fin 5)} (h : quorum x src) :
+    corroborated x := by
+  obtain ⟨_, _, _, e, _, he⟩ := h
+  obtain ⟨g, hg, g', hg', hne⟩ :=
+    Finset.one_lt_card.mp (show 1 < (Finset.univ.filter fun g => e ∈ x.recent g).card by
+      unfold votes at he; omega)
+  simp only [Finset.mem_filter, Finset.mem_univ, true_and] at hg hg'
+  exact ⟨e, g, g', hne, hg, hg'⟩
+
+/-- No single fly can raise an incident or a lead on its own: rule E (and so rule D) alerts only
+about an entity two different flies named. -/
+theorem alert_corroborated {x : Second α} (h : confirmedOrStrong x) : corroborated x := by
+  rcases h with h | h <;> exact quorum_corroborated h
+
+/-- Rule B does not have that property: the single fly alone raises it. -/
+theorem teamOrSingle_uncorroborated :
+    ∃ x : Second ℕ, teamOrSingle x ∧ ¬ corroborated x := by
+  refine ⟨⟨fun f => f == single, fun _ => ∅, fun _ => ∅, fun _ => false⟩,
+    Or.inr rfl, ?_⟩
+  rintro ⟨e, g, g', -, h, -⟩
+  simp at h
+
+/-- A lead that is not an incident has a specialist at `STRONG` times its threshold firing. -/
+theorem lead_has_strong_specialist {x : Second α} (h : confirmedOrStrong x) (hn : ¬ confirmed x) :
+    ∃ f ∈ specialists, x.now f ∧ x.strong f := by
+  rcases h with h | ⟨f, hf, -⟩
+  · exact absurd h hn
+  · simp only [Finset.mem_filter] at hf
+    exact ⟨f, hf.1, hf.2.1, hf.2.2⟩
 
 end FlySOC
 ```
@@ -485,6 +640,22 @@ look-alike alerts (7 more on the eval set), which is why they are a separate, lo
 incidents. The network fly alone sees every scan within a minute,
 but alarms for 253 seconds. With 50 look-alikes, differences of a few alerts are within noise.
 
+**Precision: what lands in the queue.** "Look-alikes alerted" above counts an episode when *any*
+alert fires during it, about any host. On a 5-server network that mostly counts alerts about an
+intrusion that shares a server with the look-alike (M10). `tools/attribution.py` scores the JSON
+alerts the way an analyst would see them: alerts about one entity less than 60 s apart are one
+queue entry, attributed to an intrusion if the entity takes part in one at that time.
+
+| alert queue | eval set | final set | final: first alert naming an intrusion host |
+|---|---|---|---|
+| D, incidents | 44 alerts, 91% about an intrusion | 43 alerts, **79%** (5 scanner, 4 about nothing) | +102 s |
+| E, incidents + leads | 55 alerts, 91% | 55 alerts, 76% (5 scanner, 8 about nothing) | +90 s |
+
+Holdout: every alert (5 for D, 6 for E) is about one of its 2 intrusions. The remaining problem is
+volume: an intrusion involves about four entities (workstation, target, user, lateral servers),
+so it fills the queue with about four alerts (O14). Teaching the flies which sources fan out
+routinely (familiarity) did not help and was reverted (O14).
+
 What each specialist can and cannot see:
 - **DNS** catches every exfiltration, but late: exfiltration is the last stage.
 - **Network** sees every slow scan and is the fastest, but is also the noisiest on plain traffic
@@ -501,7 +672,9 @@ sets (M9), history glomeruli of their own (E9), and thresholds calibrated on eno
 feature lands on different glomeruli (`Encoder::individual`). Their output spikes are summed into one
 voter per role, so the coordinator still sees five roles. Extra flies are cheap, because the GPU is
 bound by dispatches, not neurons. 50 flies play 2417 s in 58 s in `watch` (one row per role, one
-column per individual). Eval set (cluster_eval_21-25), rule D, measured before the calibration
+column per individual). 50 flies use 528 MiB of GPU memory and 1.1 GiB of RAM at peak (5 flies:
+about 210 MiB and 575 MiB), and play a 2400 s file in 60 s (5 flies: 16 s), after training once
+in 82 s and calibrating in 307 s. Eval set (cluster_eval_21-25), rule D, measured before the calibration
 file of L8 (thresholds from the training file alone):
 
 | flies | median first alert ↓ | look-alikes alerted ↓ | false alert seconds ↓ | train + 5 files |
@@ -583,12 +756,24 @@ What happened, round by round:
    and 58 of 80 replays alert instead of 52. Red's #3 still mostly gets through: it sprays only 8
    accounts, too few for the identity fly, so no second fly names the scanning workstation.
 7. **Red adapted to leads (O13).** Evolved against rule E on 8 backgrounds per candidate, red's best
-   rose from 0.49 to 0.88 in six generations. Its winners spread every slow stage out at once: 32-37
-   ports over 4-21 minutes, exfiltration over 26 minutes, and the top one also sprays 15 accounts
-   over 15 minutes. On 20 unseen backgrounds (9101-9120) they reach 0.84, 0.82, 0.84 against rule D
-   (caught 35 of 80 replays, baseline included); the replay against rule E is still to run. Blue's next answer is
-   the O12 remainder: a lead that needs no second fly when one specialist *stays* above its
-   threshold.
+   rose from 0.49 to 0.88 in six generations. Its winners slow the scan (4-21 minutes) and
+   exfiltration (26 minutes). On 20 unseen backgrounds (9101-9120):
+
+   | red's genome | rule D | rule E |
+   |---|---|---|
+   | #1: scan over 15 min, **spray over 15 min**, exfil over 26 min | 0.84 | **0.84** |
+   | #2: scan over 4 min, spray in 1 min, exfil over 26 min | 0.82 | 0.41 |
+   | #3: scan over 21 min, spray in 1 min, exfil over 26 min | 0.84 | 0.68 |
+   | unchanged Phase 3 intrusion | 0.49 | 0.36 |
+   | caught, of 80 replays | 35 | 53 |
+
+   Leads stop the fast-spray genomes: the identity fly names the attacker during the spray, and
+   that is the second fly a lead needs. #1 slows the spray too, so no two flies are ever sure
+   about the same host at once. Measured per fly, nothing stays above its threshold for long: the
+   network fly crosses it during the slow recon for about 5 s at 1.25x, the identity fly during the
+   slow spray for about 6 s. Two specialists agreeing over a longer horizon (10-40 minutes) caught
+   everything but alarmed in 42-45 seconds of plain traffic, so it was rejected (O13). Blue's
+   next answer has to link an entity's stages in kill-chain order, not just count agreeing flies.
 
 ![Red vs blue on 20 fresh backgrounds](docs/red_vs_blue.png)
 
@@ -633,7 +818,9 @@ enabling GL as well loads the OpenGL and Mesa drivers too.
 | `tools/gen_traffic.py`, `tools/gen_intrusion.py` | Synthetic telemetry with labelled attacks and benign look-alikes |
 | `tools/red.py` | Phase 4 red team: evolves the intrusion, retrains blue |
 | `tools/scorecards.py`, `tools/flies_roi.py`, `tools/phase4_plots.py` | Scorecard aggregation and the graphs in `docs/` |
-| `tools/o9.py` | Per-fly, per-stage evidence against thresholds on red's replays (L8, O12) |
+| `tools/o9.py` | Per-fly, per-stage evidence against thresholds on red's replays, and seconds above (L8, O12, O13) |
+| `tools/attribution.py` | Entity-aware scoring of JSON alerts as an analyst's queue: precision per alert (M10) |
+| `proofs/FlySOC.lean` | Phase 5: Lean 4 proofs about the encoding, learning and coordinator |
 | `docs/ISSUES.md` | Every problem, its cause and fix |
 
 ## Credits

@@ -113,20 +113,56 @@ backgrounds no generation used (9101-9120, `data/runs/red8/fresh.txt`):
 
 | genome | against D | against E |
 |---|---|---|
-| #1: 32 ports over 919 s, 15 accounts over 883 s, exfil over 1583 s | 0.84 | not run yet |
-| #2: 37 ports over 235 s, 15 accounts over 60 s, exfil over 1583 s | 0.82 | not run yet |
-| #3: 37 ports over 1263 s, 15 accounts over 60 s, exfil over 1583 s | 0.84 | not run yet |
-| unchanged Phase 3 intrusion | 0.49 | not run yet |
-| caught, of 80 replays | 35 | not run yet |
+| #1: 32 ports over 919 s, 15 accounts over 883 s, exfil over 1583 s | 0.84 | **0.84** |
+| #2: 37 ports over 235 s, 15 accounts over 60 s, exfil over 1583 s | 0.82 | 0.41 |
+| #3: 37 ports over 1263 s, 15 accounts over 60 s, exfil over 1583 s | 0.84 | 0.68 |
+| unchanged Phase 3 intrusion | 0.49 | 0.36 |
+| caught, of 80 replays | 35 | 53 |
 
-The baseline's 0.49 against D matches the earlier run on the same backgrounds (O12), so the
-replays are consistent.
-**Likely cause, not yet measured**: leads need a second fly to agree about the same host within
-the evidence average's memory (about 60 s). When every stage is slow, the stages are minutes apart,
-so a specialist that is sure during one stage has no partner by the time the next starts.
-`tools/o9.py` on these replays will show the per-fly peaks and confirm or refute this.
-**Next**: the O12 remainder, a lead from one specialist that stays above its threshold (sustained
-over minutes, not one second), then evolve red against that.
+The baseline's 0.49 against D and 0.36 against E match the earlier run on the same backgrounds
+(O12), so the replays are consistent. Leads stop #2 (0.82 → 0.41) and half of #3, which spray 15
+accounts in a minute and so give the identity fly a reason to name the attacker. #1 is the real
+adaptation: it also spreads the spray over 15 minutes, and reaches 0.84 against both rules.
+**Cause** (measured below): a lead needs a specialist at 1.5x its threshold plus a second fly
+naming the same host within HORIZON_S (300 s). Slowed down, no stage pushes any fly past about
+1.25x, and the stages are minutes apart. A fast spray still gives the identity fly a strong,
+brief reason to name the attacker, which is why #2 and #3 are caught more often.
+**Measured** (`tools/o9.py`, which now also counts seconds above threshold; red's 3 best and the
+baseline on backgrounds 7001-7003, `data/runs/red8/o9.txt`): nothing stays above its threshold. The
+network fly crosses it during recon in 11 of 12 replays, but for a median 5 s, at 1.25x; the
+identity fly during the spray in 10 of 12, for 6 s, at 1.21x. So a "sustained specialist" lead has
+nothing to sustain. Each specialist does fire in its own stage, about the attacker, minutes apart.
+**Tried**: rule F, rule E or two different specialists that fired about the same entity within a
+slow horizon (any strength), one of them now. Eval set:
+
+| slow horizon | first alert | look-alikes | false alert seconds |
+|---|---|---|---|
+| (rule E) | +74 s | 30/50 | 0 |
+| 600 s | +34 s | 40/50 | **43** |
+| 1200 s | +34 s | 41/50 | **42** |
+| 1800 s | +34 s | 41/50 | **44** |
+| 2400 s | +34 s | 42/50 | **45** |
+
+Rejected: specialists name the same few busy servers all the time, so two of them agreeing over
+minutes is noise (`data/runs/o13/`).
+**Next**: a coordinator that links an entity's stages in kill-chain order (scan, then logins from
+the same source, then ...), rather than any two flies agreeing.
+
+### O14. Every intrusion fills the queue with about 4 alerts, and the scanner adds some (P3, P4)
+**Symptom**: scored as an analyst's queue (M10), rule D raises 43 alerts on the final set: 34 about
+the 10 intrusions, 5 about the authorised scanner, 4 about nothing labelled (precision 79%).
+**Cause**: alerts are per entity, and an intrusion involves several: the attacker's workstation,
+the target server, the sprayed user, the servers reached by lateral movement. The scanner's sweep
+smells exactly like recon: E4 removed host identity from the odour on purpose.
+**Tried**: familiarity, a glomerulus lit when the source had fanned out this far before, on safe
+training traffic, and frozen after training like the mushroom body (`History::learned_from`).
+On the eval set it made no difference (D +82 s; look-alikes alerted by entity 9/50 against 8/50),
+because there the scanner caused only 1 alert. Two lessons on the way: lit on every count, the
+flag made later files smell different from training everywhere (D: 19 false-alarm seconds); and
+reserving 2 more glomeruli for it changed which glomeruli every field hashes into, which alone
+cost D 18 false seconds (E9 again: results hang on the hashing layout). Reverted.
+**Next**: group alerts into cases (entities linked by the same events within minutes), so an
+intrusion is one line in the queue, not four.
 
 ---
 
@@ -665,6 +701,30 @@ thing.
 **Lesson**: when re-deriving a result outside the code, match its initial conditions, and check
 against the code's own output before drawing conclusions.
 
+### M10. "Look-alikes alerted" counted coincidences, not false alarms (P3, P4)
+**Symptom**: the scorecard said rule D alerts on 20 of 50 look-alikes on the final set (E: 24), which
+reads as a false-positive rate near 50%.
+**Cause**: the scorecard counts an episode as alerted when any alert fires during it, about any
+entity. The eval and final files overlay 10 look-alikes on 2 intrusions in 40 minutes, on a network
+of 5 servers: a scan or an admin session usually shares a server with an intrusion running at the
+same time, and the alert about that server is about the intrusion. Of the 8 look-alike episodes
+that rule D's alerts named an entity of on the eval set, 7 had an intrusion on the same server at
+that moment.
+**Fix**: `tools/attribution.py` scores `flysoc cluster`'s JSON alerts as an analyst's queue:
+alerts about one entity less than 60 s apart are one alert, attributed to an intrusion if the entity
+takes part in one at that time, else to a look-alike, else to nothing.
+
+| alert queue | eval: alerts, precision | final: alerts, precision | final: first alert naming the intrusion |
+|---|---|---|---|
+| D, incidents | 44, 91% (1 scanner, 3 nothing) | 43, **79%** (5 scanner, 4 nothing) | +102 s |
+| E, incidents + leads | 55, 91% (1 scanner, 4 nothing) | 55, 76% (5 scanner, 8 nothing) | +90 s |
+
+Holdout: 5 alerts (D), 6 (E), all about the 2 intrusions. The scorecard's time-only first alert was
+also generous: on the final set, D's first alert *naming one of the intrusion's hosts* is +102 s
+(scorecard +89 s), E's +90 s (+60 s). Raw alerts in `data/runs/fp/`.
+**Lesson**: score what the analyst sees, an alert about an entity, not a second in which something
+fired.
+
 ### M9. Two intrusions and ten look-alikes are too few to compare rules (P3)
 **Symptom**: on `cluster_test`, coordinator rule C (all five flies vote) beat the single fly on
 speed and look-alikes. On `cluster_holdout` it lost on both, and the single fly's 0/10 look-alikes
@@ -696,3 +756,15 @@ restarts from 0 (`Watch::describe`). Labels count as "happening" for 10 s after 
 otherwise the slow scan (one event every 3 s) would flicker the log. On Hyprland you can also run
 `hyprctl clients` to see titles. A text overlay in the window needs a UI library (egui is planned
 for Phase 6).
+
+### D3. Setting up Lean and Mathlib (P5)
+**Symptom**: `lake new lean math` failed with "reserved package name". In a project named
+`FlySOC`, `lake init` then failed to fetch Mathlib: "couldn't find remote ref v4.36.0".
+**Cause**: `lean` is a reserved package name. Lake's math template pins Mathlib to the tag of
+the newest Lean release (v4.36.0), which Mathlib had not tagged yet; its newest tag was v4.35.0.
+**Fix**: the project lives in `proofs/`, with Mathlib pinned to `v4.35.0` in `lakefile.toml` and
+the matching `leanprover/lean4:v4.35.0` in `lean-toolchain`. `lake exe cache get` downloads
+Mathlib prebuilt (about 7 GB in `proofs/.lake`, which `proofs/.gitignore` ignores), so nothing of
+Mathlib is compiled locally.
+**Lesson**: pin Mathlib to a tag that exists, and pin the toolchain to match it.
+
