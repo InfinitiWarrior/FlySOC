@@ -148,7 +148,7 @@ minutes is noise (`data/runs/o13/`).
 **Next**: a coordinator that links an entity's stages in kill-chain order (scan, then logins from
 the same source, then ...), rather than any two flies agreeing.
 
-### O14. Every intrusion fills the queue with about 4 alerts, and the scanner adds some (P3, P4)
+### O14. Every intrusion fills the queue with about 4 alerts, and the scanner adds some (P3, P4; partly fixed by cases)
 **Symptom**: scored as an analyst's queue (M10), rule D raises 43 alerts on the final set: 34 about
 the 10 intrusions, 5 about the authorised scanner, 4 about nothing labelled (precision 79%).
 **Cause**: alerts are per entity, and an intrusion involves several: the attacker's workstation,
@@ -161,8 +161,36 @@ because there the scanner caused only 1 alert. Two lessons on the way: lit on ev
 flag made later files smell different from training everywhere (D: 19 false-alarm seconds); and
 reserving 2 more glomeruli for it changed which glomeruli every field hashes into, which alone
 cost D 18 false seconds (E9 again: results hang on the hashing layout). Reverted.
-**Next**: group alerts into cases (entities linked by the same events within minutes), so an
-intrusion is one line in the queue, not four.
+Also tried: a 4x longer training file (`cluster_train_long.jsonl`, 9600 s: 8 intrusions, every
+look-alike 8 times, seed 51), so the flies learn what is safe from 8 examples instead of 2, with the
+calibration quantile re-swept. Eval set, rule D, scored as a queue (`data/runs/long/`):
+
+| training, quantile | first alert | queue alerts | not about an intrusion |
+|---|---|---|---|
+| 2400 s (current), 0.995 | +87 s | 44 | **4** |
+| 9600 s, 0.995 | **+74 s** | 73 | 18 |
+| 9600 s, 0.998 | +74 s | 48 | 7 |
+| 9600 s, 0.999 | +82 s | 38 | 5 |
+
+More safe training depresses more synapses, so calm output drops and the thresholds with it
+(network 31 → 26, DNS 57 → 39): the flies get faster and noisier together. Re-raising the quantile
+slides back along the same curve; at equal speed it is no better. Kept: 2400 s, 0.995.
+**Lesson**: with this encoding, more of the same synthetic data buys speed or precision, not both.
+What is left that could move the curve itself: a learned readout on the Kenyon cell code instead of
+a threshold on MBON spikes, and better data (O4).
+**Partial fix: cases** (`Coordinator::case`, `CASE_S`; JSON `"case"` and `"named"`). An alert
+joins an open case when anything its firing flies name was named in it before. Prototyped on the
+eval alerts first: linking two alerts through *any* event between their entities joined everything,
+because every workstation talks to the 5 servers all the time; linking only through what the flies
+named works. Forbidding servers to join a case on their own split 7 of 10 intrusions in two, so
+servers do join. Window, eval set (rule D incident cases): 300 s, 18 cases, 9 of 10 intrusions split
+(stages are minutes apart); **600 s**, 8 cases, 1 split, 3 holding two intrusions; 900 s, 7 cases, 1
+split, 4 holding two. Reported (`tools/cases.py`, `data/runs/fp/`): final set, 43 queue alerts → 5
+cases, all about intrusions, none split; holdout 2 cases, one per intrusion.
+**Still open**: on the final set every case holds both of its file's intrusions (they share
+servers within 10 minutes), and the 9 alerts about no intrusion are folded into those cases rather
+than shown alone, so a case can hide an unrelated alert. A network with more than 5 servers would
+show whether this is the synthetic network or the linking.
 
 ---
 

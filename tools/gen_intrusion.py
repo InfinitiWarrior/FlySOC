@@ -174,6 +174,15 @@ if __name__ == "__main__":
           scenario(13, 2400, [400, 1700], [(w, 100 + 55 * k) for k, w in enumerate(ALL)] + [(w, 1200 + 65 * k) for k, w in enumerate(ALL)]))
 
 
+    # A 4x longer training file: 8 intrusions and every look-alike 8 times, so the flies learn what
+    # is safe from more than 2 examples each (ISSUES O14). Four 2400 s chunks with random timings.
+    trng, intr, looks = random.Random(51 * 7919), [], []
+    for c in range(4):
+        i, l = random_times(trng)
+        intr += [t + 2400 * c for t in i]
+        looks += [(w, t + 2400 * c) for w, t in l]
+    write("data/telemetry/cluster_train_long.jsonl", scenario(51, 9600, intr, looks))
+
     # Two sets of 5 seeds with random timings, 10 intrusions and 50 look-alikes each. One file of
     # 2 intrusions and 10 look-alikes is too small to tell coordinator rules apart.
     # cluster_eval_*: for choosing between options. cluster_final_*: never used for choosing; report these.

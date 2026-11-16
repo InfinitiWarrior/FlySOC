@@ -191,11 +191,16 @@ pub struct Coordinator {
     thresholds: Vec<f64>,
     ema: Vec<f64>,
     fired: Vec<Option<(usize, Vec<String>)>>, // per fly: last second it fired, and its suspects then
+    cases: Vec<(std::collections::HashSet<String>, usize)>, // per case: entities named in it, last alert
 }
+
+/// A case stays open this long after its last alert. Chosen on the eval set: 300 s split 9 of 10
+/// intrusions in two (their stages are minutes apart), 900 s merged more of them (ISSUES O14).
+const CASE_S: usize = 600;
 
 impl Coordinator {
     pub fn new(thresholds: &[f64]) -> Self {
-        Self { thresholds: thresholds.to_vec(), ema: vec![0.0; thresholds.len()], fired: vec![None; thresholds.len()] }
+        Self { thresholds: thresholds.to_vec(), ema: vec![0.0; thresholds.len()], fired: vec![None; thresholds.len()], cases: Vec::new() }
     }
 
     /// Feeds second `s`; returns which flies fire now.
@@ -211,11 +216,28 @@ impl Coordinator {
         now
     }
 
-    /// The alert of second `s`, if any: ("incident" by RULE, else "lead" by LEAD), confidence and
-    /// entity. Call after `second`.
-    pub fn alert(&self, s: usize, now: &[bool], suspects: &[Vec<String>]) -> Option<(&'static str, f32, String)> {
+    /// The alert of second `s`, if any: ("incident" by RULE, else "lead" by LEAD), confidence,
+    /// entity and case. Call after `second`.
+    pub fn alert(&mut self, s: usize, now: &[bool], suspects: &[Vec<String>]) -> Option<(&'static str, f32, String, usize)> {
         let tier = |kind: &'static str, rule| self.incident(s, now, suspects, rule).map(|(c, e)| (kind, c, e));
-        tier("incident", RULE).or_else(|| tier("lead", LEAD))
+        let (kind, c, e) = tier("incident", RULE).or_else(|| tier("lead", LEAD))?;
+        Some((kind, c, e.clone(), self.case(s, &named(now, suspects, &e))))
+    }
+
+    /// The case an alert naming `named` belongs to: an open case that any of them was named in
+    /// before, else a new one. Linking through what the firing flies named together (a scan names
+    /// source and target, a spray source, target and user) follows the intrusion from host to host;
+    /// linking through any traffic would join everything through the shared servers (ISSUES O14).
+    fn case(&mut self, s: usize, named: &[String]) -> usize {
+        let open = self.cases.iter().position(|(ents, last)| s - last <= CASE_S && named.iter().any(|n| ents.contains(n)));
+        let id = open.unwrap_or_else(|| {
+            self.cases.push(Default::default());
+            self.cases.len() - 1
+        });
+        let (ents, last) = &mut self.cases[id];
+        ents.extend(named.iter().cloned());
+        *last = s;
+        id
     }
 
     /// The incident `rule` raises in second `s`, if any: (confidence, entity). Call after `second`.
@@ -249,6 +271,15 @@ impl Coordinator {
     }
 }
 
+/// The alert's entity and everything the flies firing now name with it, sorted.
+fn named(now: &[bool], suspects: &[Vec<String>], entity: &str) -> Vec<String> {
+    let mut v: Vec<String> = (0..now.len()).filter(|&f| now[f]).flat_map(|f| suspects[f].iter().cloned()).collect();
+    v.push(entity.to_string());
+    v.sort();
+    v.dedup();
+    v
+}
+
 pub fn run(fly: &Fly, syn: Synapses, train: &str, events: &str) -> Result<(), String> {
     let events = detect::read_events(events)?;
     let (circuit, syn) = detect::circuit(fly, &syn); // the full connectome is dropped here
@@ -272,10 +303,11 @@ pub fn run(fly: &Fly, syn: Synapses, train: &str, events: &str) -> Result<(), St
         for (r, (rule, _)) in RULES.iter().enumerate() {
             cluster[r][s] = coord.incident(s, &now, &suspects, *rule).is_some();
         }
-        if let Some((kind, confidence, entity)) = coord.alert(s, &now, &suspects) {
+        if let Some((kind, confidence, entity, case)) = coord.alert(s, &now, &suspects) {
             let truth: Vec<&String> = labels[s].iter().filter(|l| *l != "benign").collect();
             let who: Vec<&str> = (0..SPECIALISTS).filter(|&f| now[f]).map(|f| FLIES[f].0).collect();
-            println!(r#"{{"ts_start":{s},"ts_end":{},"kind":"{kind}","entity":"{entity}","confidence":{confidence:.2},"flies":{who:?},"truth":{truth:?}}}"#, s + 1);
+            let named = named(&now, &suspects, &entity);
+            println!(r#"{{"ts_start":{s},"ts_end":{},"kind":"{kind}","case":{case},"entity":"{entity}","confidence":{confidence:.2},"flies":{who:?},"named":{named:?},"truth":{truth:?}}}"#, s + 1);
         }
     }
     if let Ok(path) = std::env::var("FLYSOC_TRACE") {
@@ -396,7 +428,7 @@ pub struct Watch {
     coord: Coordinator,
     now: usize,
     alarm: u32,
-    incident: Option<(&'static str, f32, String)>, // tier, confidence, entity
+    incident: Option<(&'static str, f32, String, usize)>, // tier, confidence, entity, case
     logged: String, // last terminal log line, minus the time
     loop_started: Option<std::time::Instant>,
 }
@@ -450,9 +482,9 @@ impl Watch {
             "happening: {}  |  red: {}  |  {}",
             self.happening(self.now),
             if red.is_empty() { "none".into() } else { red.join(", ") },
-            self.incident.as_ref().map_or("no incident".into(), |(kind, c, e)| match *kind {
-                "incident" => format!("CLUSTER INCIDENT about {e}, {:.0}% of flies agree", c * 100.0),
-                _ => format!("lead (strong specialist + 1) about {e}, {:.0}% of flies agree", c * 100.0),
+            self.incident.as_ref().map_or("no incident".into(), |(kind, c, e, case)| match *kind {
+                "incident" => format!("CLUSTER INCIDENT about {e} (case {case}), {:.0}% of flies agree", c * 100.0),
+                _ => format!("lead (strong specialist + 1) about {e} (case {case}), {:.0}% of flies agree", c * 100.0),
             }),
         )
     }

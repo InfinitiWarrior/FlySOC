@@ -98,7 +98,8 @@ lateral horn local neurons (LHLN). Training takes a few seconds and is not saved
 
 `cluster <labelled> <events>` trains the four specialists and the single fly, then prints one JSON
 alert per alerted second to stdout, with its tier (`"kind":"incident"` by rule D, or `"lead"` by
-rule E where D is silent), confidence and the flies that agree, and a scorecard
+rule E where D is silent), its case (`"case"`, see below), confidence, the flies that agree and
+everything they name with the entity (`"named"`), and a scorecard
 for every fly and the cluster to stderr. The trained cluster is cached in `data/cache/`, keyed on the
 training file, the calibration file and the FlySOC binary: the first run trains and calibrates
 (about 2 minutes: 19 s training, 96 s calibration replays), later runs load it at once
@@ -651,10 +652,26 @@ queue entry, attributed to an intrusion if the entity takes part in one at that 
 | D, incidents | 44 alerts, 91% about an intrusion | 43 alerts, **79%** (5 scanner, 4 about nothing) | +102 s |
 | E, incidents + leads | 55 alerts, 91% | 55 alerts, 76% (5 scanner, 8 about nothing) | +90 s |
 
-Holdout: every alert (5 for D, 6 for E) is about one of its 2 intrusions. The remaining problem is
-volume: an intrusion involves about four entities (workstation, target, user, lateral servers),
-so it fills the queue with about four alerts (O14). Teaching the flies which sources fan out
-routinely (familiarity) did not help and was reverted (O14).
+Holdout: every alert (5 for D, 6 for E) is about one of its 2 intrusions. Neither more training
+data nor familiarity with routine scanners moved the speed/precision curve; both are in O14.
+
+**Cases.** An intrusion involves about four entities (workstation, target, user, lateral servers),
+so it raised about four queue entries. The coordinator now groups alerts into cases: an alert
+joins an open case (last alert under 10 minutes ago) when anything its firing flies name was
+named in that case before. A scan names source and target, a spray source, target and user, so a
+case follows the intrusion from host to host. Linking through any traffic instead would join
+everything through the shared servers. Scored by `tools/cases.py` (rule D's incident cases):
+
+| | queue alerts | cases | cases about an intrusion | intrusions split | cases holding both of a file's intrusions |
+|---|---|---|---|---|---|
+| eval | 44 | 8 | 8 | 1 of 10 | 3 |
+| final | 43 | **5** | **5** | 0 | 5 |
+| holdout | 5 | 2 | 2 | 0 | 0 |
+
+On the final set the analyst would read 5 cases instead of 43 alerts, every one a real intrusion,
+at no cost in speed. The weakness: on this 5-server network both intrusions of a file name the
+same servers within 10 minutes, so on the final set every case holds both, and the 9 alerts that
+were about no intrusion are folded into them instead of standing alone (O14).
 
 What each specialist can and cannot see:
 - **DNS** catches every exfiltration, but late: exfiltration is the last stage.
@@ -812,7 +829,7 @@ enabling GL as well loads the OpenGL and Mesa drivers too.
 |---|---|
 | `src/sim.rs`, `src/sim.wgsl` | GPU spiking simulation (event-driven LIF, delay ring, plastic synapses) |
 | `src/detect.rs` | Event encoding, the specialist circuit, learning and the single-fly detector |
-| `src/cluster.rs` | Specialists, coordinator, incident rules, training cache, `watch` driver |
+| `src/cluster.rs` | Specialists, coordinator, incident rules, cases, training cache, `watch` driver |
 | `src/view.rs`, `src/view.wgsl` | 3D viewer and offscreen snapshots |
 | `tools/convert.py` | FlyWire export → `data/fly.bin` |
 | `tools/gen_traffic.py`, `tools/gen_intrusion.py` | Synthetic telemetry with labelled attacks and benign look-alikes |
@@ -820,6 +837,7 @@ enabling GL as well loads the OpenGL and Mesa drivers too.
 | `tools/scorecards.py`, `tools/flies_roi.py`, `tools/phase4_plots.py` | Scorecard aggregation and the graphs in `docs/` |
 | `tools/o9.py` | Per-fly, per-stage evidence against thresholds on red's replays, and seconds above (L8, O12, O13) |
 | `tools/attribution.py` | Entity-aware scoring of JSON alerts as an analyst's queue: precision per alert (M10) |
+| `tools/cases.py` | Scores the cases the coordinator groups alerts into (O14) |
 | `proofs/FlySOC.lean` | Phase 5: Lean 4 proofs about the encoding, learning and coordinator |
 | `docs/ISSUES.md` | Every problem, its cause and fix |
 
@@ -832,5 +850,12 @@ enabling GL as well loads the OpenGL and Mesa drivers too.
   [Drosophila_brain_model](https://github.com/philshiu/Drosophila_brain_model).
 - Learning rule: Hige et al. 2015, *Heterosynaptic plasticity underlies aversive olfactory
   learning in Drosophila*, *Neuron*.
+- Real enterprise telemetry: Los Alamos National Laboratory, *Comprehensive, Multi-Source
+  Cyber-Security Events* (A. D. Kent 2015, [doi:10.17021/1179829](https://doi.org/10.17021/1179829),
+  [csr.lanl.gov/data/cyber1](https://csr.lanl.gov/data/cyber1/)), released under CC0. The files are
+  not in this repo; download them yourself into `data/lanl/`. Citation:
+  A. D. Kent, "Comprehensive, Multi-Source Cyber-Security Events," Los Alamos National Laboratory,
+  2015. Also: A. D. Kent, "Cybersecurity Data Sources for Dynamic Network Research," in *Dynamic
+  Networks in Cybersecurity*, Imperial College Press, 2015.
 
 Check the FlyWire data's own terms before redistributing it or anything derived from it.
