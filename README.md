@@ -129,6 +129,8 @@ DNS fly and the single fly red.
 
 `FLYSOC_TRACE=<file>` writes every fly's per-second MBON and Kenyon cell spikes as TSV.
 `FLYSOC_FLY_LOG=<file>` writes every second a fly is alarmed, with the suspects it names, as TSV.
+`FLYSOC_SHARDS=1` (with `FLYSOC_REPLICAS=K`) splits each role's K individuals by source instead
+of giving each all events, each measured against its own 30-minute background (O15, experimental).
 `FLYSOC_CALIB=<file>` calibrates thresholds on another benign file (default
 `data/telemetry/cluster_calib.jsonl`; LANL uses its own weekday slice).
 
@@ -874,6 +876,11 @@ calibration 290 s, once (cached); each 4-hour slice then takes about 2 minutes w
 Calibrating on a weekend slice instead (day 3) left the identity fly alarmed 22% of the time (M11).
 The cluster rules raise no alerts: they need two flies to agree, and only the identity fly sees
 logons; the red team's flows and processes are not labelled, so they are not scored.
+
+Splitting each role into 10 shards of the network, each judged against its own background
+(`FLYSOC_SHARDS=1`), cuts false alarm episodes over both slices from 45 to 19 and lets the network
+fly name `C17693` from its flows, but the identity fly then loses its early catch. Why one odd logon
+a minute does not move the identity fly is open (O15).
 
 ## Memory
 

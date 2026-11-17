@@ -51,6 +51,12 @@ fn calibration() -> String {
 pub fn replicas() -> usize {
     std::env::var("FLYSOC_REPLICAS").ok().and_then(|v| v.parse().ok()).unwrap_or(1)
 }
+/// FLYSOC_SHARDS=1: a role's individuals split the network by source instead of each smelling
+/// all of it, and the role reads its most alarmed individual (O15). On a big network one
+/// individual's response is otherwise averaged over every source's events.
+pub fn sharded() -> bool {
+    std::env::var("FLYSOC_SHARDS").is_ok_and(|v| v == "1")
+}
 const EVIDENCE_S: f64 = 20.0;
 const MEMORY_S: usize = 3 * EVIDENCE_S as usize; // how long the evidence average remembers
 const QUORUM: usize = 2;
@@ -79,7 +85,12 @@ pub fn build(device: &wgpu::Device, queue: &wgpu::Queue, circuit: Fly, syn: Syna
     let sim = Sim::new(device, queue, n * k as u32, syn.replicate(k), &mb.plastic, 0.0);
     let encs: Vec<Encoder> = FLIES
         .iter()
-        .flat_map(|(_, kinds)| (0..replicas()).map(|r| Encoder::new(&circuit, kinds).individual(r as u8)))
+        .flat_map(|(_, kinds)| {
+            (0..replicas()).map(|r| match sharded() {
+                true => Encoder::new(&circuit, kinds).shard(r, replicas()),
+                false => Encoder::new(&circuit, kinds).individual(r as u8),
+            })
+        })
         .collect();
 
     let train_bytes = std::fs::read(train_path).map_err(|e| format!("{train_path}: {e}"))?;
@@ -87,7 +98,7 @@ pub fn build(device: &wgpu::Device, queue: &wgpu::Queue, circuit: Fly, syn: Syna
     let calib_bytes = std::fs::read(&calib_path).map_err(|e| format!("{calib_path}: {e} (run tools/gen_intrusion.py)"))?;
     let exe = std::env::current_exe().and_then(std::fs::read).unwrap_or_default();
     let key = detect::fnv(&train_bytes) ^ detect::fnv(&exe).rotate_left(1) ^ detect::fnv(&calib_bytes).rotate_left(2);
-    let cache = format!("data/cache/cluster{k}-{key:016x}.bin");
+    let cache = format!("data/cache/cluster{k}{}-{key:016x}.bin", if sharded() { "s" } else { "" });
     if let Some((w, thresholds)) = load_cache(&cache, mb.plastic.w.len(), FLIES.len()) {
         sim.set_plastic(queue, &w);
         eprintln!("loaded the trained cluster from {cache}");
@@ -345,25 +356,52 @@ pub fn run(fly: &Fly, syn: Synapses, train: &str, events: &str) -> Result<(), St
 }
 
 /// Per-individual windows [fly][..] -> per-role windows: spikes summed over a role's individuals,
-/// suspects and labels from its first individual (they all see the same events).
+/// suspects and labels from its first individual (they all see the same events). Sharded: each
+/// individual is first measured against its own background (`relative`), then each second the
+/// role takes the window of its most alarmed individual, suspects included.
 fn pool(flies: Vec<Vec<detect::Window>>) -> Vec<Vec<detect::Window>> {
     let mut flies = flies.into_iter();
     (0..FLIES.len())
         .map(|_| {
             let mut role: Vec<Vec<detect::Window>> = flies.by_ref().take(replicas()).collect();
+            if sharded() {
+                role.iter_mut().for_each(|w| relative(w));
+            }
             let first = role.remove(0);
             first
                 .into_iter()
                 .enumerate()
                 .map(|(t, mut w)| {
-                    for other in &role {
-                        w.spikes.iter_mut().zip(other[t].spikes).for_each(|(a, b)| *a += b);
+                    for other in &mut role {
+                        if !sharded() {
+                            w.spikes.iter_mut().zip(other[t].spikes).for_each(|(a, b)| *a += b);
+                        } else if other[t].spikes[detect::DETECT_ON] > w.spikes[detect::DETECT_ON] {
+                            w = std::mem::replace(&mut other[t], w);
+                        }
                     }
                     w
                 })
                 .collect()
         })
         .collect()
+}
+
+/// How long a shard's background average remembers: long next to an attack's minutes, short next
+/// to the day's swing between afternoon and evening (O15).
+const BACKGROUND_S: f64 = 1800.0;
+
+/// A shard's readout as RELATIVE_SCALE x its EVIDENCE_S average over its BACKGROUND_S average
+/// (+1 spike/s, so a silent shard does not divide by zero). The background starts as a running
+/// mean. Busy and quiet parts of the network, and busy and quiet hours, then share one threshold.
+const RELATIVE_SCALE: f64 = 10.0;
+fn relative(windows: &mut [detect::Window]) {
+    let (mut fast, mut slow) = (0.0, 0.0);
+    for (t, w) in windows.iter_mut().enumerate() {
+        let x = w.spikes[detect::DETECT_ON] as f64;
+        fast += (x - fast) / EVIDENCE_S;
+        slow += (x - slow) / BACKGROUND_S.min(t as f64 + 1.0);
+        w.spikes[detect::DETECT_ON] = (RELATIVE_SCALE * fast / (slow + 1.0)).round() as u32;
+    }
 }
 
 /// MBON spikes per second, exponentially averaged over ~EVIDENCE_S seconds.

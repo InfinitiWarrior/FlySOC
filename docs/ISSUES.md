@@ -55,8 +55,33 @@ identity episodes about the attack (was 4); eval_2 still silent; synthetic eval 
 look-alikes alerted (was 23), E 33/50 (was 30), first alerts +88 s / +77 s (were +87 / +74). Shared
 machines also reach 16 users in 15 minutes by day, and 16 and 18 share a power-of-two bucket.
 Reverted; raw runs in `data/runs/r1/` and `data/runs/lanl/r1_*`.
-**Next**: thresholds relative to the time of day or a rolling background, and a count the fly can
-tell apart at LANL's scale (accounts per source relative to that source's own history).
+Offline, the R1 count separates well: red-team logons have a median 6 users per source in 15
+minutes on eval_2, where 0.06% of benign logons reach 6 (eval_1: 5, 1.6%). The fly cannot use it
+because its readout sums every logon: one odd logon a minute among ~600 normal ones in a 20 s
+average. And no threshold helps on its own: near red-team logons the 20 s average peaks at 14.7,
+the evening's benign maximum is 15.1.
+**Tried**: shards (`FLYSOC_SHARDS=1`, `FLYSOC_REPLICAS=10`: each role's 10 individuals smell only
+sources hashing to their tenth of the network, the role reads its most alarmed individual).
+- Most readout spikes wins: the busiest shard sets the bar (identity threshold 107.7). eval_1: 1 of
+  14 identity episodes about the attack.
+- Each shard against its own background (`relative`: 20 s average over its 30-minute average), so
+  busy and quiet shards and hours share one threshold. False episodes over both slices fall from 45
+  to 19, and the network fly names `C17693` from its unlabelled flows (eval_1 +3700 s, 1 episode, 0
+  false); the single fly does too (eval_2 +12371 s). But the identity fly loses its eval_1 catch.
+- The same with the R1 count: identical to the second within one second. The count does not reach
+  the identity fly's readout at all.
+
+| (eval slices, all flies) | eval_1 episodes: attack / false | eval_2 | first naming `C17693` |
+|---|---|---|---|
+| 1 fly per role | 4 / 29 | 0 / 16 | identity +38 s, +689 s (eval_1) |
+| 10 shards, loudest | 1 / 25 | 0 / 7 | identity names `C1610`, not the attacker |
+| 10 shards, each relative | 2 / 7 | 1 / 12 | network +3700 s (eval_1), single fly +12371 s (eval_2) |
+
+Default behaviour is unchanged (synthetic eval reproduced exactly). Training 50 flies on a 4-hour
+slice takes 449 s, calibration 614 s, a slice about 4 minutes. Raw runs: `data/runs/lanl/s*`.
+**Next**: probe how many readout spikes one logon with a high history bucket adds over an ordinary
+one, in isolation. If it is small, the history code needs more weight than 4 glomeruli in 20
+(E8) before any pooling can help.
 
 ### O5. The whole brain still ignites (P0 viewer)
 **Symptom**: in the whole-brain viewer, steady input makes about 60% of Kenyon cells fire at once

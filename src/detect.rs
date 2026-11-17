@@ -175,6 +175,11 @@ impl Event {
         all.into_iter().flatten().cloned().collect()
     }
 
+    /// Where the event comes from: the source, or the host it ran on. Shards split by this.
+    fn origin(&self) -> &str {
+        self.src.as_deref().or(self.host.as_deref()).unwrap_or("")
+    }
+
     /// The components of this event's odour, one per field. Same field value, same component.
     fn features(&self) -> Vec<String> {
         let f = |name: &str, o: &Option<String>| format!("{name}={}", o.as_deref().unwrap_or(""));
@@ -291,6 +296,7 @@ pub struct Encoder {
     glomeruli: Vec<Vec<u32>>, // ORNs grouped by cell type
     kinds: Vec<String>,       // event kinds this fly smells; others pass it by
     salt: u8,                 // individual fly: which glomeruli each feature lands on (0 = the original)
+    shard: (u64, u64),        // (k, n): smells only events whose source hashes to k of n (O15)
 }
 
 impl Encoder {
@@ -299,7 +305,12 @@ impl Encoder {
         for i in fly.of_class("olfactory") {
             by_type.entry(fly.cell_type[i as usize]).or_default().push(i);
         }
-        Self { glomeruli: by_type.into_values().collect(), kinds: kinds.iter().map(|k| k.to_string()).collect(), salt: 0 }
+        Self { glomeruli: by_type.into_values().collect(), kinds: kinds.iter().map(|k| k.to_string()).collect(), salt: 0, shard: (0, 1) }
+    }
+
+    /// Watches one part of the network: events whose source (or host) hashes to `k` of `n`.
+    pub fn shard(self, k: usize, n: usize) -> Self {
+        Self { shard: (k as u64, n as u64), ..self }
     }
 
     /// The same fly's role in another individual: every feature lands on different glomeruli.
@@ -311,6 +322,9 @@ impl Encoder {
     /// `history`: the event's components from `History::observe`.
     pub fn neurons(&self, e: &Event, history: &[String]) -> Option<impl Iterator<Item = u32> + '_> {
         if !self.kinds.contains(&e.kind) {
+            return None;
+        }
+        if self.shard.1 > 1 && fnv(e.origin().as_bytes()) % self.shard.1 != self.shard.0 {
             return None;
         }
         // Fields hash into the first glomeruli. History components get the last HISTORY_GLOMERULI,
