@@ -604,6 +604,9 @@ mod tests {
         // 15 minutes later both have expired
         assert_eq!(h.observe(&fail(1100.0, "u01")).components, ["src_failed_users=1", "src_failed_users_long=1"]);
         assert_eq!(seen.entities, ["10.0.0.7", "u09"]);
+        // a success adds nothing: u01 from 1100 s is still the only failed user (ISSUES R1)
+        let ok = Event { result: Some("ok".into()), ..fail(1101.0, "u02") };
+        assert_eq!(h.observe(&ok).components, ["src_failed_users=1", "src_failed_users_long=1"]);
     }
 
     #[test]

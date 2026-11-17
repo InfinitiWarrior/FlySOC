@@ -41,6 +41,11 @@ const CALM_QUANTILE: f64 = 0.995;
 /// training file's ~1,700, and do not depend on which rare benign bursts that file has (ISSUES L8).
 /// Written by tools/gen_intrusion.py.
 pub const CALIBRATION: &str = "data/telemetry/cluster_calib.jsonl";
+
+/// Benign calibration telemetry: CALIBRATION, or FLYSOC_CALIB (e.g. a LANL slice).
+fn calibration() -> String {
+    std::env::var("FLYSOC_CALIB").unwrap_or_else(|_| CALIBRATION.into())
+}
 /// Individual flies per role. Each smells the same kinds through different glomeruli; their
 /// output spikes are summed into one voter, so the coordinator still sees five roles.
 pub fn replicas() -> usize {
@@ -78,7 +83,8 @@ pub fn build(device: &wgpu::Device, queue: &wgpu::Queue, circuit: Fly, syn: Syna
         .collect();
 
     let train_bytes = std::fs::read(train_path).map_err(|e| format!("{train_path}: {e}"))?;
-    let calib_bytes = std::fs::read(CALIBRATION).map_err(|e| format!("{CALIBRATION}: {e} (run tools/gen_intrusion.py)"))?;
+    let calib_path = calibration();
+    let calib_bytes = std::fs::read(&calib_path).map_err(|e| format!("{calib_path}: {e} (run tools/gen_intrusion.py)"))?;
     let exe = std::env::current_exe().and_then(std::fs::read).unwrap_or_default();
     let key = detect::fnv(&train_bytes) ^ detect::fnv(&exe).rotate_left(1) ^ detect::fnv(&calib_bytes).rotate_left(2);
     let cache = format!("data/cache/cluster{k}-{key:016x}.bin");
@@ -96,7 +102,7 @@ pub fn build(device: &wgpu::Device, queue: &wgpu::Queue, circuit: Fly, syn: Syna
     eprintln!("  trained in {:.1} s; calibrating thresholds on a replay...", t.elapsed().as_secs_f32());
     let t = std::time::Instant::now();
     let replay = pool(detect::play(device, queue, &sim, &circuit, &encs, &train, secs, None));
-    let calib = detect::read_events(CALIBRATION)?;
+    let calib = detect::read_events(&calib_path)?;
     let calib_secs = detect::duration(&calib);
     let calib_replay = pool(detect::play(device, queue, &sim, &circuit, &encs, &calib, calib_secs, None));
     eprintln!("  calibrated in {:.1} s", t.elapsed().as_secs_f32());
@@ -295,11 +301,15 @@ pub fn run(fly: &Fly, syn: Synapses, train: &str, events: &str) -> Result<(), St
     let mut coord = Coordinator::new(&c.thresholds);
     let mut fired = vec![vec![false; seconds]; FLIES.len()]; // [fly][second]
     let mut cluster = vec![vec![false; seconds]; RULES.len()]; // [rule][second]
+    let mut fly_log = String::new(); // FLYSOC_FLY_LOG: every alarmed second per fly, with its suspects
     for s in 0..seconds {
         let mbon: Vec<u32> = windows.iter().map(|w| w[s].spikes[detect::DETECT_ON]).collect();
         let suspects: Vec<Vec<String>> = windows.iter().map(|w| w[s].suspects.clone()).collect();
         let now = coord.second(s, &mbon, &suspects);
         now.iter().enumerate().for_each(|(f, &x)| fired[f][s] = x);
+        for f in (0..FLIES.len()).filter(|&f| now[f]) {
+            fly_log += &format!("{s}\t{}\t{}\n", FLIES[f].0, suspects[f].join(","));
+        }
         for (r, (rule, _)) in RULES.iter().enumerate() {
             cluster[r][s] = coord.incident(s, &now, &suspects, *rule).is_some();
         }
@@ -309,6 +319,9 @@ pub fn run(fly: &Fly, syn: Synapses, train: &str, events: &str) -> Result<(), St
             let named = named(&now, &suspects, &entity);
             println!(r#"{{"ts_start":{s},"ts_end":{},"kind":"{kind}","case":{case},"entity":"{entity}","confidence":{confidence:.2},"flies":{who:?},"named":{named:?},"truth":{truth:?}}}"#, s + 1);
         }
+    }
+    if let Ok(path) = std::env::var("FLYSOC_FLY_LOG") {
+        std::fs::write(&path, fly_log).map_err(|e| format!("{path}: {e}"))?;
     }
     if let Ok(path) = std::env::var("FLYSOC_TRACE") {
         let kc = |f: &str| format!("{f}_kc");

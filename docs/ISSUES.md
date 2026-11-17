@@ -28,13 +28,35 @@ the single fly as much as the specialists, and one circuit has enough capacity f
 **Next**: a coordinator that learns how much to trust each fly, per-entity learning from look-alike
 labels, and real data (O4).
 
-### O4. Everything is synthetic
-**Symptom**: all results come from our own generators (`tools/gen_traffic.py`,
-`tools/gen_intrusion.py`).
-**Risk**: the flies may be learning quirks of the generator, e.g. its fixed set of benign ports and
-processes.
-**Next**: a real labelled dataset. CICIDS2017 has network flows. OTRF Security-Datasets has real
-recorded ATT&CK techniques from Windows hosts and fits the endpoint and identity flies.
+### O4. Mostly synthetic; real data has started (LANL)
+**Symptom**: the Phase 2-4 results come from our own generators (`tools/gen_traffic.py`,
+`tools/gen_intrusion.py`), so the flies may be learning quirks of the generator.
+**Progress**: the public LANL enterprise data (Kent 2015, 17,684 computers, red-team labels) runs
+through `tools/lanl.py` (README "Real data"). First eval results: the identity fly names the red
+team's computer in both daytime incidents among 21 alarms in 4 hours; it misses the evening
+campaign (O15). Weekday calibration was needed (M11).
+**Limits of the data**: LANL labels only the red team's logons, so only the identity fly can be
+scored; process names and most ports are anonymised, DNS has no domain names, flows end on day 15.
+**Next**: O15, then report on the final slices (days 12-14). OTRF Security-Datasets would label
+endpoint activity.
+
+### O15. Low-and-slow lateral movement with stolen accounts (LANL eval_2)
+**Symptom**: on eval_2 (day 8, 19:00-23:00) the red team logs on 136 times from `C17693` with 18
+different accounts in 15 minutes (the next busiest computer: 6), and the identity fly never alarms.
+Its 20 s average stays at a median 6.2 MBON spikes/s, max 14.7 near red-team logons, against a
+threshold of 39.1 set on a busy afternoon. Raw spikes at red-team seconds reach 83, but only 8 of
+136 are above the evening's own 99th percentile (32).
+**Cause**: two. (1) One threshold for the whole day: the evening background is a third of the
+afternoon's. (2) The auth fly's history counts only *failed* users per source (built for sprays);
+this attacker succeeds, so nothing counts the accounts it uses, and one logon a minute averages
+away over 20 s.
+**Tried**: count every user per source, failed or not (R1). Worse everywhere. Eval_1: 0 of 21
+identity episodes about the attack (was 4); eval_2 still silent; synthetic eval rule D 26/50
+look-alikes alerted (was 23), E 33/50 (was 30), first alerts +88 s / +77 s (were +87 / +74). Shared
+machines also reach 16 users in 15 minutes by day, and 16 and 18 share a power-of-two bucket.
+Reverted; raw runs in `data/runs/r1/` and `data/runs/lanl/r1_*`.
+**Next**: thresholds relative to the time of day or a rolling background, and a count the fly can
+tell apart at LANL's scale (accounts per source relative to that source's own history).
 
 ### O5. The whole brain still ignites (P0 viewer)
 **Symptom**: in the whole-brain viewer, steady input makes about 60% of Kenyon cells fire at once
@@ -752,6 +774,18 @@ also generous: on the final set, D's first alert *naming one of the intrusion's 
 (scorecard +89 s), E's +90 s (+60 s). Raw alerts in `data/runs/fp/`.
 **Lesson**: score what the analyst sees, an alert about an entity, not a second in which something
 fired.
+
+### M11. A weekend calibration set thresholds too low for weekdays (LANL)
+**Symptom**: calibrated on day 3, 08:00-12:00, the identity fly was alarmed in 1530 of 6946 benign
+seconds (22%) of eval_1 (day 8).
+**Cause**: days 3, 4, 10 and 11 carry 155 auth lines/s, the others 205-240: weekends. A quiet day's
+calm sets the threshold (30.0) below a busy day's calm.
+**Fix**: calibrate on a weekday without red-team activity, day 7, 12:00-16:00
+(`FLYSOC_CALIB=data/telemetry/lanl/calib_wd.jsonl`): threshold 39.1, 12 false seconds, both incidents
+still caught (+403 s, +38 s by the scorecard). Also found: `tools/lanl.py` wrote `failure` where the
+flies expect `fail`; fixing it changed nothing measurable (0.6% of human logons fail).
+**Lesson**: real traffic has a week; calibrate on the kind of day you will watch. The evening miss
+(O15) says the same for the time of day.
 
 ### M9. Two intrusions and ten look-alikes are too few to compare rules (P3)
 **Symptom**: on `cluster_test`, coordinator rule C (all five flies vote) beat the single fly on
