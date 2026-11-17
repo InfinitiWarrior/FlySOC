@@ -297,6 +297,7 @@ pub struct Encoder {
     kinds: Vec<String>,       // event kinds this fly smells; others pass it by
     salt: u8,                 // individual fly: which glomeruli each feature lands on (0 = the original)
     shard: (u64, u64),        // (k, n): smells only events whose source hashes to k of n (O15)
+    fields: bool,             // false: smells only history components, not the event's fields (P9)
 }
 
 impl Encoder {
@@ -305,7 +306,12 @@ impl Encoder {
         for i in fly.of_class("olfactory") {
             by_type.entry(fly.cell_type[i as usize]).or_default().push(i);
         }
-        Self { glomeruli: by_type.into_values().collect(), kinds: kinds.iter().map(|k| k.to_string()).collect(), salt: 0, shard: (0, 1) }
+        Self { glomeruli: by_type.into_values().collect(), kinds: kinds.iter().map(|k| k.to_string()).collect(), salt: 0, shard: (0, 1), fields: true }
+    }
+
+    /// Smells how many (history), not who (fields): names are novel everywhere on a big network.
+    pub fn history_only(self) -> Self {
+        Self { fields: false, ..self }
     }
 
     /// Watches one part of the network: events whose source (or host) hashes to `k` of `n`.
@@ -334,7 +340,8 @@ impl Encoder {
         let wanted = if two { HISTORY_GLOMERULI_TWO_CODES } else { HISTORY_GLOMERULI };
         let reserved = wanted.min(self.glomeruli.len() / 2) as u64;
         let fields = self.glomeruli.len() as u64 - reserved;
-        let hashed = e.features().into_iter().flat_map(move |feature| {
+        let features = if self.fields { e.features() } else { vec![] };
+        let hashed = features.into_iter().flat_map(move |feature| {
             (0..GLOMERULI_PER_FEATURE).map(move |k| {
                 let salt: &[u8] = if self.salt == 0 { &[] } else { std::slice::from_ref(&self.salt) };
                 fnv(&[feature.as_bytes(), &[k], salt].concat()) % fields

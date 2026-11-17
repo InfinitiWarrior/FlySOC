@@ -57,6 +57,15 @@ pub fn replicas() -> usize {
 pub fn sharded() -> bool {
     std::env::var("FLYSOC_SHARDS").is_ok_and(|v| v == "1")
 }
+/// Roles that smell only history counts, not the event's fields: "how many", not "who". On a big
+/// network names are novel everywhere and drown the counts (ISSUES O16, Phase 9). The network fly
+/// keeps its names: it must tell the authorised scanner from an attacker. FLYSOC_HISTORY_ONLY
+/// overrides (comma-separated roles; empty for none).
+const HISTORY_ONLY: &str = "identity";
+fn history_only() -> Vec<String> {
+    let v = std::env::var("FLYSOC_HISTORY_ONLY").unwrap_or_else(|_| HISTORY_ONLY.into());
+    v.split(',').filter(|r| !r.is_empty()).map(str::to_string).collect()
+}
 const EVIDENCE_S: f64 = 20.0;
 const MEMORY_S: usize = 3 * EVIDENCE_S as usize; // how long the evidence average remembers
 const QUORUM: usize = 2;
@@ -85,10 +94,14 @@ pub fn build(device: &wgpu::Device, queue: &wgpu::Queue, circuit: Fly, syn: Syna
     let sim = Sim::new(device, queue, n * k as u32, syn.replicate(k), &mb.plastic, 0.0);
     let encs: Vec<Encoder> = FLIES
         .iter()
-        .flat_map(|(_, kinds)| {
-            (0..replicas()).map(|r| match sharded() {
-                true => Encoder::new(&circuit, kinds).shard(r, replicas()),
-                false => Encoder::new(&circuit, kinds).individual(r as u8),
+        .flat_map(|(name, kinds)| {
+            let circuit = &circuit;
+            (0..replicas()).map(move |r| {
+                let e = match sharded() {
+                    true => Encoder::new(&circuit, kinds).shard(r, replicas()),
+                    false => Encoder::new(&circuit, kinds).individual(r as u8),
+                };
+                if history_only().iter().any(|h| h == name) { e.history_only() } else { e }
             })
         })
         .collect();
@@ -98,7 +111,7 @@ pub fn build(device: &wgpu::Device, queue: &wgpu::Queue, circuit: Fly, syn: Syna
     let calib_bytes = std::fs::read(&calib_path).map_err(|e| format!("{calib_path}: {e} (run tools/gen_intrusion.py)"))?;
     let exe = std::env::current_exe().and_then(std::fs::read).unwrap_or_default();
     let key = detect::fnv(&train_bytes) ^ detect::fnv(&exe).rotate_left(1) ^ detect::fnv(&calib_bytes).rotate_left(2);
-    let cache = format!("data/cache/cluster{k}{}-{key:016x}.bin", if sharded() { "s" } else { "" });
+    let cache = format!("data/cache/cluster{k}{}{}-{key:016x}.bin", if sharded() { "s" } else { "" }, history_only().join("+"));
     if let Some((w, thresholds)) = load_cache(&cache, mb.plastic.w.len(), FLIES.len()) {
         sim.set_plastic(queue, &w);
         eprintln!("loaded the trained cluster from {cache}");

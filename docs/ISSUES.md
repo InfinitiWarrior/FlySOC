@@ -79,9 +79,9 @@ sources hashing to their tenth of the network, the role reads its most alarmed i
 
 Default behaviour is unchanged (synthetic eval reproduced exactly). Training 50 flies on a 4-hour
 slice takes 449 s, calibration 614 s, a slice about 4 minutes. Raw runs: `data/runs/lanl/s*`.
-**Next**: probe how many readout spikes one logon with a high history bucket adds over an ordinary
-one, in isolation. If it is small, the history code needs more weight than 4 glomeruli in 20
-(E8) before any pooling can help.
+**Probe done** (O16): the count did not reach the readout because the fields drowned it; the
+identity fly now smells only counts and catches eval_2 at +57 s with no false episode. Open: the
+fly still finds far fewer attack episodes than the plain count on the final slices.
 
 ### O5. The whole brain still ignites (P0 viewer)
 **Symptom**: in the whole-brain viewer, steady input makes about 60% of Kenyon cells fire at once
@@ -240,6 +240,33 @@ than shown alone, so a case can hide an unrelated alert. A network with more tha
 show whether this is the synthetic network or the linking.
 
 ---
+
+### O16. On LANL a count of the identity fly's own input beat the fly (P8, partly fixed in P9)
+**Symptom**: LANL final slices (days 12-14, 6 incidents). Distinct users failing from a source in
+15 minutes, thresholded like the flies: 45 alarm episodes, 33 about the attack, 12 false. The
+identity fly, fed exactly that count: 41 episodes, 6 about the attack, 35 false. The other flies
+add 149 false episodes and nothing else. On the eval slices the count names `C17693` at +24 s
+and +246 s; the identity fly misses eval_2 entirely.
+**Cause** (partly known): the count reaches the fly as 4 of 20 history glomeruli per logon, one
+logon among ~29 a second, and the readout is a population rate averaged over 20 s (O15). False
+alarms on the final slices also come from calibrating on one weekday afternoon (M11) and watching
+mornings and other days.
+**On synthetic data the reverse holds**: the single fly names all 10 final intrusions with no
+false episode, and the network fly beats the port count outright (9/10 at +36 s against 0/10),
+because it learned that the authorised scanner is safe.
+**Probe** (P9, README "Phase 9"): the identity fly added 20-50 readout spikes per new logon whether
+the source's failed-users count was 1 or 16. It smelled new names, not counts, and on 17,684
+computers new names are the background (median 23 spikes/s).
+**Partial fix**: the identity fly smells only its history components (`HISTORY_ONLY` in
+`cluster.rs`). Background median 0 spikes/s. LANL eval: 10 episodes, all about the attack, eval_2
+caught at +57 s. LANL final: 12 episodes, 5 about the attack, 7 false (the count: 45, 33, 12); both
+name 2 of 6 incidents. Synthetic final: rule D unchanged; rule E +75 s, 26/50, 45 false seconds
+(was +60 s, 24/50, 2); the identity fly 102 false seconds (was 0).
+**Tried**: every fly on counts only. The network fly lost the scanner/attacker distinction (eval
+534 false seconds, was 230; rule D 22, was 0) and LANL's dns fly raised 49 false episodes. The
+endpoint fly as well as identity: synthetic false episodes 11 to 4, LANL 3 to 1, but still 2 of 10
+intrusions named and rule E +80 s: not worth it.
+**Next**: the count still finds 33 attack episodes to the fly's 5. Integrating over time (Phase 9).
 
 ## Solved: simulation and GPU
 
