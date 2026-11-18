@@ -79,7 +79,7 @@ Order of work: 8, 9, 10, 11, then the rest of Phases 5-7, then 12. Phases 13 and
 |---|---|---|
 | 8. Baselines | Simple per-entity statistics (counts, rarity scores) and a standard anomaly model (isolation forest) on the same LANL slices and synthetic files, scored the same way (`tools/lanl_score.py`, `tools/attribution.py`). | A table next to every flies result: alarms, precision, first naming of the attacker, for flies and baselines on the same final slices. Whatever the outcome, it is reported. |
 | 9. The brain handles time | The evening miss (O15) is a time problem: one odd logon a minute. Replace the hand-written 20 s evidence average with circuits from the connectome that integrate over time (e.g. a recurrent integrator downstream of the MBONs, or the mushroom body's long-term memory compartments), and document the departure it removes. | The identity fly names `C17693` on LANL eval_2 without losing eval_1 or raising false alarms; the integrator's neurons are named from FlyWire annotations; the synthetic results hold. |
-| 10. The analyst teaches the fly | An analyst marks an alert false positive or real; that becomes a dopamine signal and the fly learns from it on the spot (the same Hige rule, applied online). | Measured on LANL: alarm rate against the number of analyst marks; a mark on one benign source does not blind the fly to an attack from another. |
+| 10. The analyst teaches the fly, and the fly sleeps | An analyst marks an alert false positive or real; that becomes a dopamine signal and the fly learns from it on the spot (the same Hige rule, applied online). A sleep phase between days: replay the day's odours and pull Kenyon cell output weights back toward rest in proportion to how rarely each pattern was met (synaptic homeostasis; fruit fly synapses shrink in sleep), so one harmless sighting does not blind the fly to a pattern for good; and "dreams": rehearse attack variants from `tools/red.py`. Initial inspiration: Google's SLEEP framework for LLMs; what we do differently and why is in [Phase 10 design](#phase-10-design-a-fly-that-sleeps). | Measured on LANL: alarm rate against the number of analyst marks; a mark on one benign source does not blind the fly to an attack from another; over several simulated days with sleep, harmless patterns that recur stop alarming while rare patterns and attacks still alarm, against the same days without sleep. |
 | 11. Explain every alert | Trace each alarm back: readout neurons, Kenyon cells, glomeruli, event fields, then one sentence ("C17693 used 18 accounts in 15 minutes; this fly has never smelled that"). Phase 6's view lights up that path. | Every JSON alert carries its explanation; checked by hand on a sample of LANL and synthetic alerts. |
 | 12. Live mode | Read logs as they happen: Zeek for network flows; Sysmon or Windows event logs for logons and processes; from a homelab or a single machine. Uses Phase 10 to adapt. | FlySOC runs for a week on a live network, with alarms and analyst marks logged. |
 | 13. Human vs fly (maybe) | Red vs blue as a game: a person plays the attacker against the trained flies on the synthetic network, or the analyst against red's evolved attacks. Reuses `tools/red.py`, the viewer and the coordinator. | Playable from one command, with a score. |
@@ -1019,6 +1019,33 @@ an intrusion. The cost is noisier leads on the synthetic network.
 **Still to do in Phase 9:** integrating over time with circuits from the connectome, judged against
 the failed-users count on LANL.
 
+## Phase 10 design: a fly that sleeps
+
+Initial inspiration: Google Research's SLEEP framework for LLMs (Behrouz, Hashemi, Javanmard and
+Mirrokni 2026, *Language Models Need Sleep*; see Credits). An LLM learns new knowledge into fast, short-term memory while awake. In a sleep phase it
+**consolidates** (distils that memory into newly added low-rank experts, then resets the short-term
+parameters) and **dreams** (generates its own practice data, filters it and fine-tunes on the
+best). The aim is continual learning without catastrophic forgetting.
+
+FlySOC keeps the two ideas, wake and sleep, consolidation and dreams, and builds them from the fly's
+own biology instead of the LLM machinery:
+
+| | SLEEP (LLMs) | FlySOC (planned) | why |
+|---|---|---|---|
+| where new learning goes | fast memory layers, then new mixture-of-experts experts | the existing Kenyon cell → MBON synapses, by the Hige rule, online from analyst marks | the mushroom body already stores each odour in a sparse, mostly separate set of Kenyon cells: new learning lands in new synapses without adding parameters |
+| consolidation | distillation into the new experts, then reset | replay the day's odours; pull each synapse back toward rest in proportion to how rarely its pattern was met (synaptic downscaling) | fruit fly synapses shrink in sleep (Bushey et al. 2011), and the mushroom body and the fan-shaped body's sleep neurons are in the connectome (Joiner et al. 2006; Donlea et al. 2011) |
+| what it fixes | forgetting old knowledge when learning new | the fly's actual failure (O16): one harmless sighting of a rare pattern silences it for good, so rare and common look the same | a plain count gets "rare" from a percentile; the fly needs frequency in its weights, which is what renormalisation by replay gives |
+| dreams | self-generated samples, filtered, used for fine-tuning | rehearse attack variants evolved by `tools/red.py` | red's genomes are bounded to real ATT&CK behaviour (Phase 4), so the dreams stay realistic without human labels |
+| cost | distillation and RL fine-tuning of a large model | one replay of a day's telemetry on the GPU (minutes) | fits a local, single-machine SOC tool |
+
+Why we expect this to suit the fly better than it suits an LLM: an LLM's knowledge is spread over
+every weight, so continual learning needs extra machinery (new experts, distillation) to avoid
+overwriting it. The mushroom body's sparse expansion with local, dopamine-gated learning resists
+forgetting by construction (Shen, Dasgupta and Navlakha 2023); sleep then only has to fix what
+the fly gets wrong, how often each pattern is harmless. That is an expectation, not a result:
+Phase 10's done-when compares the same LANL days with and without sleep. The fly cannot reason or
+generalise like an LLM; the claim is only about learning what is normal on one network over time.
+
 ## Memory
 
 | | Whole brain | Circuit |
@@ -1060,6 +1087,18 @@ enabling GL as well loads the OpenGL and Mesa drivers too.
   [Drosophila_brain_model](https://github.com/philshiu/Drosophila_brain_model).
 - Learning rule: Hige et al. 2015, *Heterosynaptic plasticity underlies aversive olfactory
   learning in Drosophila*, *Neuron*.
+- Initial inspiration for Phase 10's sleep phase: A. Behrouz, F. Hashemi, A. Javanmard and V.
+  Mirrokni, *Language Models Need Sleep: Learning to Self-Modify and Consolidate Memories*, 2026,
+  [arXiv:2606.03979](https://arxiv.org/abs/2606.03979), and the Google Research
+  [blog post](https://research.google/blog/the-sleep-framework-a-new-way-for-llms-to-retain-knowledge-in-continual-learning/).
+  Their ablation finds dreaming the most important part; they cite synaptic downscaling (Tononi
+  and Cirelli 2006) as motivation but consolidate by distillation, where FlySOC downscales.
+- Fly sleep and forgetting: Bushey, Tononi and Cirelli 2011, *Sleep and synaptic homeostasis:
+  structural evidence in Drosophila*, *Science*; Joiner et al. 2006, *Sleep in Drosophila is
+  regulated by adult mushroom bodies*, *Nature*; Donlea et al. 2011, *Inducing sleep by remote
+  control facilitates memory consolidation in Drosophila*, *Science*; Shen, Dasgupta and Navlakha
+  2023, *Reducing catastrophic forgetting with associative learning: a lesson from fruit flies*,
+  *Neural Computation*.
 - Real enterprise telemetry: Los Alamos National Laboratory, *Comprehensive, Multi-Source
   Cyber-Security Events* (A. D. Kent 2015, [doi:10.17021/1179829](https://doi.org/10.17021/1179829),
   [csr.lanl.gov/data/cyber1](https://csr.lanl.gov/data/cyber1/)), released under CC0. The files are

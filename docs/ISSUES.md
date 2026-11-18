@@ -266,7 +266,18 @@ name 2 of 6 incidents. Synthetic final: rule D unchanged; rule E +75 s, 26/50, 4
 534 false seconds, was 230; rule D 22, was 0) and LANL's dns fly raised 49 false episodes. The
 endpoint fly as well as identity: synthetic false episodes 11 to 4, LANL 3 to 1, but still 2 of 10
 intrusions named and rule E +80 s: not worth it.
-**Next**: the count still finds 33 attack episodes to the fly's 5. Integrating over time (Phase 9).
+**Why the count still wins** (P9 probe, counts-only fly): each injected logon still fires 40-100
+Kenyon cell spikes, the same at count 1 and 16, and adds ~0 readout spikes. The Kenyon cells see
+the counts; the output synapses learned to ignore them, because the learning rule depresses a
+pattern on every harmless sighting and a big network shows even rare counts harmlessly during 4
+hours of training. A count gets "rare" from a percentile; the fly has no notion of frequency.
+**Tried**: two global learning-rate changes, each a separate binary (`data/runs/p9/rec_*`, `lr_*`):
+faster recovery (RECOVERY 0.002 to 0.01 per window) and gentler depression (LR_SAFE 0.1 to 0.02).
+Both restore a readout response (8-77 spikes per logon), but flat across counts 1-16, and a few
+extreme training seconds push the threshold above 300. LANL eval: 2 attack / 2 false episodes, and
+0 / 7 (default: 10 / 0). Rejected. A uniform rate cannot make the fly frequency-aware; a rule that
+weighs how often each pattern was harmless can (Phase 10's sleep phase, README "Phase 10 design").
+**Next**: integrating over time (Phase 9), then sleep (Phase 10).
 
 ## Solved: simulation and GPU
 
