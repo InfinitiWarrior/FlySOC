@@ -242,12 +242,19 @@ impl Coordinator {
         Self { thresholds: thresholds.to_vec(), ema: vec![0.0; thresholds.len()], fired: vec![None; thresholds.len()], cases: Vec::new() }
     }
 
-    /// Feeds second `s`; returns which flies fire now.
-    pub fn second(&mut self, s: usize, mbon: &[u32], suspects: &[Vec<String>]) -> Vec<bool> {
+    /// Fly `f`'s evidence now, in multiples of its threshold.
+    pub fn strength(&self, f: usize) -> f64 {
+        self.ema[f] / self.thresholds[f].max(f64::EPSILON)
+    }
+
+    /// Feeds second `s`; returns which flies fire now. A fly above its threshold fires only if
+    /// `fan[f]`: its suspects show fan-out (`fan_out`); otherwise it reacted to an event itself,
+    /// and on a big network that is novelty, not an attack (Phase 11, ISSUES O18).
+    pub fn second(&mut self, s: usize, mbon: &[u32], suspects: &[Vec<String>], fan: &[bool]) -> Vec<bool> {
         let mut now = vec![false; mbon.len()];
         for f in 0..mbon.len() {
             self.ema[f] += (mbon[f] as f64 - self.ema[f]) / EVIDENCE_S;
-            now[f] = s >= detect::WARMUP_S && self.ema[f] > self.thresholds[f];
+            now[f] = s >= detect::WARMUP_S && self.ema[f] > self.thresholds[f] && fan[f];
             if now[f] {
                 self.fired[f] = Some((s, suspects[f].clone()));
             }
@@ -334,14 +341,18 @@ pub fn run(fly: &Fly, syn: Synapses, train: &str, events: &str) -> Result<(), St
     let mut coord = Coordinator::new(&c.thresholds);
     let mut fired = vec![vec![false; seconds]; FLIES.len()]; // [fly][second]
     let mut cluster = vec![vec![false; seconds]; RULES.len()]; // [rule][second]
-    let mut fly_log = String::new(); // FLYSOC_FLY_LOG: every alarmed second per fly, with its suspects
+    let mut fly_log = String::new(); // FLYSOC_FLY_LOG: every alarmed second per fly: suspects, why
     for s in 0..seconds {
         let mbon: Vec<u32> = windows.iter().map(|w| w[s].spikes[detect::DETECT_ON]).collect();
         let suspects: Vec<Vec<String>> = windows.iter().map(|w| w[s].suspects.clone()).collect();
-        let now = coord.second(s, &mbon, &suspects);
+        let fan: Vec<bool> = windows.iter().map(|w| fan_out(&w[s])).collect();
+        let now = coord.second(s, &mbon, &suspects, &fan);
         now.iter().enumerate().for_each(|(f, &x)| fired[f][s] = x);
-        for f in (0..FLIES.len()).filter(|&f| now[f]) {
-            fly_log += &format!("{s}\t{}\t{}\n", FLIES[f].0, suspects[f].join(","));
+        if now.iter().any(|&x| x) && std::env::var("FLYSOC_FLY_LOG").is_ok() {
+            let (why, _) = explain(&now, &coord, &windows, s);
+            for (k, f) in (0..FLIES.len()).filter(|&f| now[f]).enumerate() {
+                fly_log += &format!("{s}\t{}\t{}\t{}\n", FLIES[f].0, suspects[f].join(","), why[k]);
+            }
         }
         for (r, (rule, _)) in RULES.iter().enumerate() {
             cluster[r][s] = coord.incident(s, &now, &suspects, *rule).is_some();
@@ -350,7 +361,9 @@ pub fn run(fly: &Fly, syn: Synapses, train: &str, events: &str) -> Result<(), St
             let truth: Vec<&String> = labels[s].iter().filter(|l| *l != "benign").collect();
             let who: Vec<&str> = (0..SPECIALISTS).filter(|&f| now[f]).map(|f| FLIES[f].0).collect();
             let named = named(&now, &suspects, &entity);
-            println!(r#"{{"ts_start":{s},"ts_end":{},"kind":"{kind}","case":{case},"entity":"{entity}","confidence":{confidence:.2},"flies":{who:?},"named":{named:?},"truth":{truth:?}}}"#, s + 1);
+            let (why, attack) = explain(&now, &coord, &windows, s);
+            let (why, attack) = (serde_json::to_string(&why).unwrap(), serde_json::to_string(&attack).unwrap());
+            println!(r#"{{"ts_start":{s},"ts_end":{},"kind":"{kind}","case":{case},"entity":"{entity}","confidence":{confidence:.2},"flies":{who:?},"named":{named:?},"why":{why},"attack":{attack},"truth":{truth:?}}}"#, s + 1);
         }
     }
     if let Ok(path) = std::env::var("FLYSOC_FLY_LOG") {
@@ -375,6 +388,35 @@ pub fn run(fly: &Fly, syn: Synapses, train: &str, events: &str) -> Result<(), St
         eprintln!("{:>13}  {}", format!("cluster {name}"), score(&labels, &cluster[r]));
     }
     Ok(())
+}
+
+/// Whether a fly's suspects show fan-out: a count of at least 2 behind them. A fly with none
+/// reacted to an event itself (`detect::describe` says "no fan-out"). Chosen on the eval sets:
+/// on LANL it removed all 25 false DNS episodes and no attack episode; on synthetic data nothing.
+fn fan_out(w: &detect::Window) -> bool {
+    w.reason.is_some_and(|r| r.count >= 2)
+}
+
+/// Phase 11: why an alert fired, one sentence per fly firing in second `s` (its strength against
+/// its threshold, and the count behind its suspects), and the ATT&CK techniques those counts are
+/// consistent with, without repeats.
+fn explain(now: &[bool], coord: &Coordinator, windows: &[Vec<detect::Window>], s: usize) -> (Vec<String>, Vec<&'static str>) {
+    let (mut why, mut attack) = (Vec::new(), Vec::new());
+    for f in (0..FLIES.len()).filter(|&f| now[f]) {
+        let w = &windows[f][s];
+        let who = w.suspects.first().map_or("?", |x| x.as_str());
+        let (text, technique) = match w.reason {
+            Some(r) => detect::describe(r, who),
+            None => ("no suspect in the last 20 s".to_string(), None),
+        };
+        let name = FLIES[f].0;
+        let role = if name.ends_with("fly") { name.to_string() } else { format!("{name} fly") };
+        why.push(format!("{role} at {:.1}x its threshold: {text}", coord.strength(f)));
+        if let Some(t) = technique.filter(|t| !attack.contains(t)) {
+            attack.push(t);
+        }
+    }
+    (why, attack)
 }
 
 /// Per-individual windows [fly][..] -> per-role windows: spikes summed over a role's individuals,
@@ -661,8 +703,9 @@ impl Driver for Watch {
             let windows = detect::windows(&c.circuit, &fired, labels, suspects).into_iter().map(|w| vec![w]).collect();
             let windows: Vec<detect::Window> = pool(windows).into_iter().map(|mut w| w.remove(0)).collect();
             let mbon: Vec<u32> = windows.iter().map(|w| w.spikes[detect::DETECT_ON]).collect();
+            let fan: Vec<bool> = windows.iter().map(fan_out).collect();
             let suspects: Vec<Vec<String>> = windows.into_iter().map(|w| w.suspects).collect();
-            let now = self.coord.second(s, &mbon, &suspects);
+            let now = self.coord.second(s, &mbon, &suspects, &fan);
             let incident = self.coord.alert(s, &now, &suspects);
             self.alarm = now.iter().enumerate().fold(0, |m, (f, &x)| m | (x as u32) << f);
             (self.now, self.incident) = (s, incident);
@@ -707,7 +750,7 @@ mod tests {
         spikes
             .iter()
             .map(|&s| {
-                let mut w = detect::Window { spikes: [0; detect::TRACED.len()], labels: vec![], suspects: vec![] };
+                let mut w = detect::Window { spikes: [0; detect::TRACED.len()], labels: vec![], suspects: vec![], reason: None };
                 w.spikes[detect::DETECT_ON] = s;
                 w
             })
@@ -718,6 +761,30 @@ mod tests {
         let mut w = shard(spikes);
         relative(&mut w);
         w.iter().map(|w| w.spikes[detect::DETECT_ON]).collect()
+    }
+
+    #[test]
+    fn a_fly_without_fan_out_does_not_fire_but_keeps_its_evidence() {
+        // O18: two flies, both far above threshold; fly 1's suspects show no fan-out
+        let mut c = Coordinator::new(&[1.0, 1.0]);
+        let sus = vec![vec!["C1".to_string()], vec!["C2".to_string()]];
+        let mut now = vec![];
+        for s in 0..100 {
+            now = c.second(s, &[100, 100], &sus, &[true, false]);
+        }
+        assert_eq!(now, [true, false], "the fly without fan-out must not fire");
+        assert!(c.strength(1) > 10.0, "but its evidence still accumulates: {}", c.strength(1));
+        // once its suspects show fan-out, it fires at once: no waiting for the average to refill
+        assert_eq!(c.second(100, &[100, 100], &sus, &[true, true]), [true, true]);
+    }
+
+    #[test]
+    fn fan_out_needs_a_count_of_at_least_two() {
+        let w = |reason| detect::Window { spikes: [0; detect::TRACED.len()], labels: vec![], suspects: vec![], reason };
+        let r = |count| Some(detect::Reason { what: "src_failed_users", count });
+        assert!(!fan_out(&w(None)), "no suspect, no fan-out");
+        assert!(!fan_out(&w(r(0))) && !fan_out(&w(r(1))), "0 or 1 is no fan-out");
+        assert!(fan_out(&w(r(2))) && fan_out(&w(r(40))));
     }
 
     #[test]

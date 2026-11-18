@@ -296,7 +296,7 @@ impl History {
         if slow {
             components.push(format!("{name}_long={}", bucket(long)));
         }
-        Seen { components, count: long, entities: e.entities() }
+        Seen { components, count: long, entities: e.entities(), what: name }
     }
 }
 
@@ -306,6 +306,32 @@ pub struct Seen {
     pub components: Vec<String>,
     pub count: usize,
     pub entities: Vec<String>,
+    pub what: &'static str, // which count: "src_ports", "src_failed_users", ... ("" for none)
+}
+
+/// Why a fly blames its suspects: which history count was the most extreme among its recent
+/// events, and how high (the longest window's count). Phase 11.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Reason {
+    pub what: &'static str,
+    pub count: usize,
+}
+
+/// One sentence an analyst can check against the logs, and the ATT&CK technique the behaviour is
+/// consistent with (None when the count is no fan-out: the fly then reacted to the event itself).
+/// `who` is the suspect's first entity: the source, or the host.
+pub fn describe(r: Reason, who: &str) -> (String, Option<&'static str>) {
+    let (text, technique) = match r.what {
+        "src_ports" => (format!("{who} connected to {} distinct ports in 15 minutes", r.count), "T1046 Network Service Discovery"),
+        "src_failed_users" => (format!("{} distinct users failed to log in from {who} in 15 minutes", r.count), "T1110.003 Password Spraying"),
+        "host_processes" => (format!("{} distinct processes started on {who} in 1 minute", r.count), "T1569.002 Service Execution"),
+        "names_per_domain" => (format!("{who} looked up {} distinct names under one domain in 15 minutes", r.count), "T1048 Exfiltration Over Alternative Protocol (DNS)"),
+        _ => return (format!("unusual activity involving {who}"), None),
+    };
+    match r.count {
+        0 | 1 => (format!("no fan-out behind {who} (count {}): the fly reacted to the event itself, a combination it has rarely smelled as safe", r.count), None),
+        _ => (text, Some(technique)),
+    }
 }
 
 pub fn read_events(path: &str) -> Result<Vec<Event>, String> {
@@ -403,6 +429,8 @@ pub struct Window {
     /// Entities behind the most extreme history count among this fly's events in the last
     /// SUSPECT_S seconds: who to blame if the fly is alarmed.
     pub suspects: Vec<String>,
+    /// Why they are suspected (Phase 11).
+    pub reason: Option<Reason>,
 }
 
 /// How far back a fly looks for its suspects.
@@ -427,7 +455,7 @@ pub struct Player<'a> {
     ptr: Vec<u32>,
     labels: Vec<Vec<String>>, // per fly, this second
     history: History,
-    recent: Vec<std::collections::VecDeque<(f64, usize, Vec<String>)>>, // per fly: (ts, count, entities)
+    recent: Vec<std::collections::VecDeque<(f64, usize, Vec<String>, &'static str)>>, // per fly: (ts, count, entities, what)
 }
 
 impl<'a> Player<'a> {
@@ -468,7 +496,7 @@ impl<'a> Player<'a> {
             let seen = self.history.observe(e);
             for (f, enc) in self.encs.iter().enumerate() {
                 let Some(neurons) = enc.neurons(e, &seen.components) else { continue };
-                self.recent[f].push_back((e.ts, seen.count, seen.entities.clone()));
+                self.recent[f].push_back((e.ts, seen.count, seen.entities.clone(), seen.what));
                 if !self.labels[f].contains(&e.label) {
                     self.labels[f].push(e.label.clone());
                 }
@@ -506,23 +534,27 @@ impl<'a> Player<'a> {
         self.ptr.truncate(1);
     }
 
-    /// Per fly: the entities of its recent event with the highest history count (latest wins ties).
-    pub fn suspects(&mut self) -> Vec<Vec<String>> {
+    /// Per fly: the entities of its recent event with the highest history count (latest wins
+    /// ties), and that count as the reason to blame them.
+    pub fn suspects(&mut self) -> Vec<(Vec<String>, Option<Reason>)> {
         let now = self.bin as f64 / WINDOW_MS as f64;
         self.recent
             .iter_mut()
             .map(|q| {
-                while q.front().is_some_and(|(t, _, _)| *t < now - SUSPECT_S) {
+                while q.front().is_some_and(|(t, ..)| *t < now - SUSPECT_S) {
                     q.pop_front();
                 }
-                q.iter().rev().max_by_key(|(_, count, _)| *count).map(|(_, _, e)| e.clone()).unwrap_or_default()
+                match q.iter().rev().max_by_key(|(_, count, ..)| *count) {
+                    Some((_, count, e, what)) => (e.clone(), Some(Reason { what, count: *count })),
+                    None => (vec![], None),
+                }
             })
             .collect()
     }
 }
 
 /// Spike counts of the TRACED populations per fly, from one second's `fired`.
-pub fn windows(fly: &Fly, fired: &[u32], labels: Vec<Vec<String>>, mut suspects: Vec<Vec<String>>) -> Vec<Window> {
+pub fn windows(fly: &Fly, fired: &[u32], labels: Vec<Vec<String>>, mut suspects: Vec<(Vec<String>, Option<Reason>)>) -> Vec<Window> {
     let traced: Vec<Vec<u32>> = TRACED.iter().map(|c| fly.of_class(c)).collect();
     labels
         .into_iter()
@@ -530,7 +562,8 @@ pub fn windows(fly: &Fly, fired: &[u32], labels: Vec<Vec<String>>, mut suspects:
         .map(|(f, labels)| {
             let at = |i: u32| fired[(i + f as u32 * fly.n) as usize];
             let spikes = std::array::from_fn(|k| traced[k].iter().map(|&i| at(i)).sum());
-            Window { spikes, labels, suspects: std::mem::take(&mut suspects[f]) }
+            let (suspects, reason) = std::mem::take(&mut suspects[f]);
+            Window { spikes, labels, suspects, reason }
         })
         .collect()
 }
@@ -661,9 +694,55 @@ mod tests {
         // 15 minutes later both have expired
         assert_eq!(h.observe(&fail(1100.0, "u01")).components, ["src_failed_users=1", "src_failed_users_long=1"]);
         assert_eq!(seen.entities, ["10.0.0.7", "u09"]);
+        assert_eq!(seen.what, "src_failed_users", "the reason names which count it is (Phase 11)");
         // a success adds nothing: u01 from 1100 s is still the only failed user (ISSUES R1)
         let ok = Event { result: Some("ok".into()), ..fail(1101.0, "u02") };
         assert_eq!(h.observe(&ok).components, ["src_failed_users=1", "src_failed_users_long=1"]);
+    }
+
+    #[test]
+    fn every_kind_of_event_names_its_count() {
+        // Phase 11: History reports which count it computed, so an alert can say what it saw
+        let mut h = History::default();
+        let ev = |kind: &str| Event { kind: kind.into(), src: Some("C1".into()), host: Some("C1".into()), ..Default::default() };
+        for (kind, what) in [("conn", "src_ports"), ("auth", "src_failed_users"), ("proc", "host_processes"), ("dns", "names_per_domain"), ("other", "")] {
+            assert_eq!(h.observe(&ev(kind)).what, what, "kind {kind}");
+        }
+    }
+
+    #[test]
+    fn alerts_describe_what_was_seen_and_the_technique() {
+        // Phase 11: one checkable sentence per count, and the ATT&CK technique it is consistent with
+        let cases = [
+            ("src_ports", 40, "C17693 connected to 40 distinct ports in 15 minutes", "T1046"),
+            ("src_failed_users", 6, "6 distinct users failed to log in from C17693 in 15 minutes", "T1110.003"),
+            ("host_processes", 5, "5 distinct processes started on C17693 in 1 minute", "T1569.002"),
+            ("names_per_domain", 120, "C17693 looked up 120 distinct names under one domain in 15 minutes", "T1048"),
+        ];
+        for (what, count, text, technique) in cases {
+            let (got, t) = describe(Reason { what, count }, "C17693");
+            assert_eq!(got, text, "{what}");
+            assert!(t.is_some_and(|t| t.starts_with(technique)), "{what}: technique {t:?}, want {technique}");
+        }
+        // a count of 0 or 1 is no fan-out: say so, and claim no technique
+        for count in [0, 1] {
+            let (got, t) = describe(Reason { what: "src_failed_users", count }, "C5");
+            assert!(got.starts_with("no fan-out") && got.contains("reacted to the event itself"), "count {count}: {got}");
+            assert_eq!(t, None, "count {count}: no technique without fan-out");
+        }
+        // a kind without a count claims nothing either
+        assert_eq!(describe(Reason { what: "", count: 9 }, "C5"), ("unusual activity involving C5".to_string(), None));
+    }
+
+    #[test]
+    fn windows_carry_each_fly_s_suspects_and_reason() {
+        // two flies of the tiny fly's 8 neurons; their reasons must come through untouched
+        let fly = tiny_fly();
+        let r = Reason { what: "src_ports", count: 40 };
+        let w = windows(&fly, &[0; 16], vec![vec![], vec![]], vec![(vec!["C1".into()], Some(r)), (vec![], None)]);
+        assert_eq!(w[0].suspects, ["C1"]);
+        assert_eq!(w[0].reason, Some(r));
+        assert_eq!(w[1].reason, None);
     }
 
     #[test]
@@ -740,26 +819,60 @@ mod tests {
         }
     }
 
+    /// A fly with the real circuit's 53 glomeruli, one receptor neuron each (neuron i = glomerulus i).
+    fn fly53() -> Fly {
+        Fly {
+            n: 53,
+            pos: vec![],
+            class: vec![],
+            cell_class: vec![0; 53],
+            cell_type: (0..53).collect(),
+            names: Names { cell_class: vec!["olfactory".into()], cell_type: vec![] },
+        }
+    }
+
+    fn lit(enc: &Encoder, e: &Event, history: &[String]) -> std::collections::BTreeSet<u32> {
+        odour(enc, e, history).unwrap().into_iter().collect()
+    }
+
     #[test]
     fn history_only_smells_how_many_not_who() {
         // Phase 9: the identity fly smells only history components. Different names with the same
-        // counts must smell identical; the fields' glomeruli (neurons 0-4) are never touched.
-        let fly = tiny_fly();
-        let enc = Encoder::new(&fly, &["conn"]).history_only();
-        let full = Encoder::new(&fly, &["conn"]);
-        let h = |b: u32| vec![format!("src_ports={b}")];
-        assert_eq!(odour(&enc, &conn("C1", 445), &[]), Some(vec![]), "no history, no odour: names alone smell of nothing");
-        for b in 0..6 {
-            let a = odour(&enc, &conn("C1", 445), &h(b)).unwrap();
-            let z = odour(&enc, &conn("C99999", 3389), &h(b)).unwrap();
-            assert_eq!(a, z, "bucket {b}: two different sources with the same count must smell the same");
-            assert!(!a.is_empty(), "bucket {b}: history lights its reserved glomerulus");
-            assert!(a.iter().all(|&n| n == 5 || n == 6), "bucket {b}: {a:?} touches a field glomerulus");
+        // counts must smell identical, and with no fields there is no odour without history.
+        let fly = fly53();
+        let enc = Encoder::new(&fly, &["auth"]).history_only();
+        let auth = |src: &str, user: &str| Event { kind: "auth".into(), src: Some(src.into()), user: Some(user.into()), result: Some("fail".into()), ..Default::default() };
+        let h = |short: u32, long: u32| vec![format!("src_failed_users={short}"), format!("src_failed_users_long={long}")];
+        assert_eq!(odour(&enc, &auth("C1", "U1"), &[]), Some(vec![]), "no history, no odour: names alone smell of nothing");
+        for (sh, lo) in [(0, 0), (1, 1), (1, 5), (3, 4)] {
+            assert_eq!(lit(&enc, &auth("C1", "U1"), &h(sh, lo)), lit(&enc, &auth("C17693", "U8946"), &h(sh, lo)), "counts {sh}/{lo}: two different sources must smell the same");
         }
-        // the full fly does tell the two sources apart, which is what drowned the counts (O16)
-        assert!((0..50).any(|i| odour(&full, &conn(&format!("C{i}"), 445), &[]) != odour(&full, &conn("C1", 445), &[])));
+        // counts land only on the 20 reserved glomeruli (33..52), never on a field's
+        for b in 0..8 {
+            assert!(lit(&enc, &auth("C1", "U1"), &h(b, b)).iter().all(|&g| (33..53).contains(&g)), "bucket {b} leaves the reserved glomeruli");
+        }
+        // the full fly does tell the two apart, which is what drowned the counts (O16)
+        let full = Encoder::new(&fly, &["auth"]);
+        assert_ne!(lit(&full, &auth("C1", "U1"), &h(1, 1)), lit(&full, &auth("C17693", "U8946"), &h(1, 1)));
         // other kinds still pass by
-        assert!(odour(&enc, &Event { kind: "dns".into(), ..Default::default() }, &h(3)).is_none());
+        assert!(odour(&enc, &Event { kind: "dns".into(), ..Default::default() }, &h(1, 1)).is_none());
+    }
+
+    #[test]
+    fn flies_with_fields_keep_the_overlapping_code() {
+        // O7: 20 reserved glomeruli (33 for fields), 10 per code, where bucket b lights b .. b+3 and
+        // neighbours share 3 of 4; pinned glomerulus for glomerulus (a disjoint code was tried, O16)
+        let fly = fly53();
+        let enc = Encoder::new(&fly, &["auth"]);
+        let e = Event { kind: "auth".into(), src: Some("C1".into()), user: Some("U1".into()), result: Some("fail".into()), ..Default::default() };
+        let fields = lit(&enc, &e, &[]);
+        let hist = |c: &str| -> std::collections::BTreeSet<u32> { lit(&enc, &e, &[c.to_string()]).difference(&fields).copied().collect() };
+        for b in 0..7u32 {
+            let want: std::collections::BTreeSet<u32> = (33 + b..33 + b + 4).map(|g| g.min(42)).collect();
+            assert_eq!(hist(&format!("src_failed_users={b}")), want, "short bucket {b}");
+            let want_long: std::collections::BTreeSet<u32> = (43 + b..43 + b + 4).map(|g| g.min(52)).collect();
+            assert_eq!(hist(&format!("src_failed_users_long={b}")), want_long, "long bucket {b}");
+        }
     }
 
     /// `k` Kenyon cells (neurons 0..k), each with one plastic synapse onto neuron k, resting at `w0`.

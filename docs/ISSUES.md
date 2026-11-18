@@ -277,7 +277,18 @@ Both restore a readout response (8-77 spikes per logon), but flat across counts 
 extreme training seconds push the threshold above 300. LANL eval: 2 attack / 2 false episodes, and
 0 / 7 (default: 10 / 0). Rejected. A uniform rate cannot make the fly frequency-aware; a rule that
 weighs how often each pattern was harmless can (Phase 10's sleep phase, README "Phase 10 design").
-**Next**: integrating over time (Phase 9), then sleep (Phase 10).
+**Tried** (P9): give a history-only fly every glomerulus for its counts (26 per code instead of 10)
+and each bucket its own block of 4, so a high count shares no glomerulus with the common low ones.
+For the first time the readout rose with the count in the probe (+11 to +27 spikes per logon over
+counts 8-15), but ordinary count-1 logons now light a big block too: background p99 4 to 49 spikes/s,
+threshold 0.6 to 14.5, and the control run (count stuck at 1) swung by up to 164. LANL eval: 2
+attack / 4 false episodes (default 10 / 0); synthetic eval identity 19 / 5 and 27/50 look-alikes
+(was 18 / 0, 14/50); rule D unchanged. Reverted (`data/runs/p9b/`); a test now pins the overlapping
+code glomerulus for glomerulus.
+**Where this stands**: four attempts (global learning rates, two sleeps, a disjoint code) moved the
+readout or the noise, never the precision past the default history-only fly. On LANL final it is on
+par with a plain count of its input (7 false episodes against 12, 5 attack episodes against 33;
+since O18's fan-out vote 6 and 4).
 
 ### O17. Sleep that overwrites the day's weights destroys what attacks taught (P10, fixed; no gain yet)
 **Symptom**: `MushroomBody::sleep` as first built set every output weight to
@@ -315,6 +326,25 @@ synapses, is mostly wrong. With one failure a minute the 60-second code always r
 neighbouring 15-minute buckets share 3 of 4 glomeruli (ordinal code, O7), so a count of 16 lights
 nearly the same Kenyon cells as a count of 2. No learning rule can separate cells the encoding has
 merged: the next step is the encoding (Phase 9).
+
+## Solved: measurement and alerts (since Phase 8)
+
+### O18. Flies voted on alarms with nothing behind them (P11)
+**Symptom**: on LANL, the DNS fly raised 25 alarm episodes on the eval slices and 72 on the final
+ones, none about the attack. Phase 11's explanations said why for every one: *no fan-out behind
+C1936 (count 1): the fly reacted to the event itself*. LANL's DNS records name computers, not
+domains, so names-per-domain is always 1 and the fly reacts to unfamiliar computer pairs.
+**Cause**: a fly fired whenever its evidence passed its threshold, whatever drove it. On a big
+network novelty alone keeps a fly near threshold.
+**Fix**: the coordinator counts a fly as firing only if the count behind its suspects is at least
+2 (`fan_out` in `cluster.rs`, `Coordinator::second`'s `fan`); the evidence keeps accumulating, so
+the fly fires at once when fan-out appears. Chosen on eval: no attack episode lost on either eval
+set, the 25 DNS episodes gone, rules D and E unchanged to the second. Reported on the final sets:
+LANL false episodes 156 to 82 (DNS 72 to 0; identity 12/5/7 to 10/4/6 episodes/attack/false);
+synthetic final rule D and E unchanged, queue precision D 75% to 84%, E 75% to 82%; holdout
+unchanged. Raw runs: `data/runs/p11g/`, `p11f/`.
+**Lesson**: an explanation is also a measurement. Reading why each false alarm fired found a
+rule in one pass that four rounds of tuning the circuit had not.
 
 ## Solved: simulation and GPU
 

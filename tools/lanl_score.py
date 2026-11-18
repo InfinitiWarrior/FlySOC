@@ -38,7 +38,7 @@ def score(slice_, log):
 
     eps = defaultdict(list)  # fly -> [start, last, suspects]
     for line in open(log):
-        s, fly, sus = line.rstrip("\n").split("\t")
+        s, fly, sus = line.rstrip("\n").split("\t")[:3]  # a 4th column, if any, is the explanation
         s, sus = int(s), set(filter(None, sus.split(",")))
         if eps[fly] and s - eps[fly][-1][1] < GAP_S:
             eps[fly][-1][1] = s

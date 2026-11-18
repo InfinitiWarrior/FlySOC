@@ -44,8 +44,8 @@ data set, are in [Real data](#real-data-lanl).
   everything, and a coordinator that links alarms by host or user. On 10 held-out intrusions, the
   default rule (the team confirms the single fly) catches 10/10 at a median +89 s: 8 during the
   scan, within 2 minutes, 2 only at exfiltration, about 10 minutes in. Scored as an analyst's
-  queue, 75% of its 48 alerts are about an intrusion; the rest are the authorised scanner (4) and
-  alerts about nothing labelled (8) (see [Phase 3](#phase-3-cluster)).
+  queue, 84% of its 45 alerts are about an intrusion; the rest are the authorised scanner (1) and
+  alerts about nothing labelled (6) (see [Phase 3](#phase-3-cluster)).
 - Phase 4, in progress: red vs blue evolution (`tools/red.py`). Red found a real evasion, a
   low-and-slow scan. Blue answered twice: 15-minute history counts (E10), and leads, a second alert
   tier for a specialist that is sure of itself (O12). With leads, all 10 held-out intrusions raise
@@ -58,8 +58,10 @@ data set, are in [Real data](#real-data-lanl).
 
 - Real data: the flies run on the LANL enterprise data (17,684 computers), a 4-hour slice in about
   2 minutes. Since Phase 9's first step the identity fly smells how many accounts a source fails
-  with, not their names: on the final slices (days 12-14) 5 of its 12 alarm episodes are about the
-  red team (before: 6 of 41), on par with a plain count of the same input (O16).
+  with, not their names, and since Phase 11 a fly without fan-out behind its suspects does not
+  vote: on the final slices (days 12-14) the flies raise 82 false alarm episodes in 12 hours
+  instead of 184, and 4 of the identity fly's 10 are about the red team (before: 6 of 41). A plain
+  count of the same input still finds more (O16).
 - Phase 8, done: baselines on the same final data, scored the same way. On synthetic data the flies
   win: the single fly names all 10 intrusions with no false episode (+78 s), the network fly 9 of
   10 at +36 s; the best baseline needs +240 s. On LANL a plain count of the identity fly's own input
@@ -74,6 +76,12 @@ data set, are in [Real data](#real-data-lanl).
   theorems. Measured on the eval sets it changes nothing that matters (LANL 11 attack episodes
   against 10, synthetic identical), so it stays off: the identity fly's blind spot is in the
   encoding, not in over-learned weights (O16, O17). Analyst marks and dreams come next.
+- Phase 11, done for the alert text: every JSON alert says why each firing fly fired, with the
+  count behind it, and which ATT&CK technique that fits; checked by hand on synthetic and LANL
+  alerts ([Phase 11](#phase-11-explaining-alerts)). The explanations exposed that every false DNS
+  alarm on LANL had no fan-out behind it; a fly now votes only with fan-out (O18): rule D's queue
+  on the synthetic final set rose from 75% to 84% precision, detection unchanged. The neural path
+  (which neurons carried an alarm) is left for Phase 6's view.
 - Phase 6, not started beyond the viewer: the full 3D view.
 - Phase 7, not started: packaging.
 
@@ -122,15 +130,17 @@ cargo run --release -- bench   # 1 s of whole-brain fly time, headless
 cargo run --release -- detect --train data/telemetry/train.jsonl data/telemetry/baseline.jsonl data/telemetry/holdout.jsonl
 cargo run --release -- cluster data/telemetry/cluster_train.jsonl data/telemetry/cluster_holdout.jsonl
 cargo run --release -- watch data/telemetry/cluster_train.jsonl data/telemetry/cluster_holdout.jsonl
-cargo test --release            # 25 tests, below
+cargo test --release            # 31 tests, below
 ```
 
-`cargo test` checks the encoding (stable odours, history counts, shards split every event to
-exactly one fly, a history-only fly smells counts and never names), learning (safe windows depress,
+`cargo test` checks the encoding (stable odours, history counts, the overlapping count code pinned
+glomerulus for glomerulus, shards split every event to exactly one fly, a history-only fly smells
+counts and never names), learning (safe windows depress,
 attacks restore) and sleep (max of the day and the floor, never lowering a weight over random
 days, keeping what attacks taught, the floor falling with frequency, attack windows and spike
 counts not counted as harmless sightings, flies counting independently), the sharded readout (one threshold for busy
-and quiet shards, bursts standing out) and one GPU spike test (skipped without `data/fly.bin`).
+and quiet shards, bursts standing out), explanations (every count's sentence and technique, no
+claim without fan-out, reasons carried through), the fan-out vote, and one GPU spike test (skipped without `data/fly.bin`).
 The sleep and readout tests were checked against planted bugs (overwriting instead of restoring,
 min for max, wrong scaling, counting attack seconds or spikes, no reset, dividing by a constant):
 each fails at least one test.
@@ -145,7 +155,8 @@ lateral horn local neurons (LHLN). Training takes a few seconds and is not saved
 `cluster <labelled> <events>` trains the four specialists and the single fly, then prints one JSON
 alert per alerted second to stdout, with its tier (`"kind":"incident"` by rule D, or `"lead"` by
 rule E where D is silent), its case (`"case"`, see below), confidence, the flies that agree and
-everything they name with the entity (`"named"`), and a scorecard
+everything they name with the entity (`"named"`), why each firing fly fired (`"why"`) and the ATT&CK
+techniques that is consistent with (`"attack"`, see [Phase 11](#phase-11-explaining-alerts)), and a scorecard
 for every fly and the cluster to stderr. The trained cluster is cached in `data/cache/`, keyed on the
 training file, the calibration file and the FlySOC binary: the first run trains and calibrates
 (about 2 minutes: 19 s training, 96 s calibration replays), later runs load it at once
@@ -168,7 +179,7 @@ this page) was made: second 1010 of the holdout, the first intrusion's DNS exfil
 DNS fly and the single fly red.
 
 `FLYSOC_TRACE=<file>` writes every fly's per-second MBON and Kenyon cell spikes as TSV.
-`FLYSOC_FLY_LOG=<file>` writes every second a fly is alarmed, with the suspects it names, as TSV.
+`FLYSOC_FLY_LOG=<file>` writes every second a fly is alarmed, with the suspects it names and why, as TSV.
 `FLYSOC_SHARDS=1` (with `FLYSOC_REPLICAS=K`) splits each role's K individuals by source instead
 of giving each all events, each measured against its own 30-minute background (O15, experimental).
 `FLYSOC_HISTORY_ONLY=<roles>` sets which roles smell only history counts (default `identity`;
@@ -830,13 +841,13 @@ Look-alikes are benign activity, so alerting on one is a false positive: lower i
 | final set | intrusions caught ↑ | median first alert ↓ | look-alikes alerted ↓ | false alert seconds ↓ |
 |---|---|---|---|---|
 | network fly | 10/10 | +34 s | 23/50 | 253/2549 |
-| identity fly | 10/10 | +258 s | 19/50 | 102/2549 |
+| identity fly | 10/10 | +258 s | 17/50 | 94/2549 |
 | endpoint fly | 6/10 | +248 s | **11/50** | 28/2549 |
 | DNS fly | 10/10 | +610 s | 14/50 | **0/2549** |
 | single fly | 10/10 | +78 s | 21/50 | 2/2549 |
-| A team | 10/10 | +246 s | 23/50 | 39/2549 |
-| B team or single | 10/10 | **+41 s** | 29/50 | 41/2549 |
-| C all vote | 10/10 | +60 s | 32/50 | 82/2549 |
+| A team | 10/10 | +246 s | 22/50 | 38/2549 |
+| B team or single | 10/10 | **+41 s** | 28/50 | 40/2549 |
+| C all vote | 10/10 | +60 s | 31/50 | 81/2549 |
 | **D confirmed** (incidents) | **10/10** | +89 s | **20/50** | 2/2549 |
 | **E D or strong pair** (incidents + leads) | **10/10** | +75 s | 26/50 | 45/2549 |
 
@@ -857,7 +868,7 @@ eval slices or against red.)
 **Verdict.** Every rule catches all 10 intrusions. D alerts at a median +89 s, on 20 look-alikes and
 2 seconds of plain traffic. The single fly alone is a little faster (+78 s) with about the same
 false alarms (21/50, 2 s): the team's confirmation still does not clearly pay (O1). B and C are the
-fastest rules but alert on 29-32 look-alikes and 41-82 plain seconds. Leads (E) catch 9 of 10
+fastest rules but alert on 28-31 look-alikes and 40-81 plain seconds. Leads (E) catch 9 of 10
 intrusions within 2 minutes for 6 more look-alike alerts and 43 more plain seconds (11 more
 look-alikes on the eval set), which is why they are a separate, lower tier rather than incidents. The network fly alone sees every scan within a minute,
 but alarms for 253 seconds. With 50 look-alikes, differences of a few alerts are within noise.
@@ -870,11 +881,13 @@ queue entry, attributed to an intrusion if the entity takes part in one at that 
 
 | alert queue | eval set | final set | final: first alert naming an intrusion host |
 |---|---|---|---|
-| D, incidents | 43 alerts, 93% about an intrusion | 48 alerts, **75%** (4 scanner, 8 about nothing) | +96 s |
-| E, incidents + leads | 66 alerts, 89% | 72 alerts, 75% (4 scanner, 14 about nothing) | +89 s |
+| D, incidents | 43 alerts, 93% about an intrusion | 45 alerts, **84%** (1 scanner, 6 about nothing) | +102 s |
+| E, incidents + leads | 65 alerts, 91% | 66 alerts, 82% (1 scanner, 11 about nothing) | +96 s |
 
-Holdout: every alert (6 for D, 8 for E) is about one of its 2 intrusions. (Before Phase 9: eval
-44 and 55 alerts, 91%; final 43 at 79%, +102 s, and 55 at 76%, +90 s; holdout 5 and 6.) Neither more training
+Holdout: every alert (6 for D, 8 for E) is about one of its 2 intrusions. Since Phase 11 a fly
+votes only with fan-out behind its suspects (O18); before that the final set had 48 alerts at 75%
+(+96 s) and 72 at 75% (+89 s), eval 66 at 89% for E. (Before Phase 9: eval 44 and 55 alerts, 91%;
+final 43 at 79%, +102 s, and 55 at 76%, +90 s; holdout 5 and 6.) Neither more training
 data nor familiarity with routine scanners moved the speed/precision curve; both are in O14.
 
 **Cases.** An intrusion involves about four entities (workstation, target, user, lateral servers),
@@ -887,12 +900,12 @@ everything through the shared servers. Scored by `tools/cases.py` (rule D's inci
 | | queue alerts | cases | cases about an intrusion | intrusions split | cases holding both of a file's intrusions |
 |---|---|---|---|---|---|
 | eval | 43 | 8 | 8 | 1 of 10 | 3 |
-| final | 48 | **5** | **5** | 0 | 5 |
+| final | 45 | **5** | **5** | 0 | 5 |
 | holdout | 6 | 2 | 2 | 0 | 0 |
 
-On the final set the analyst would read 5 cases instead of 48 alerts, every one a real intrusion,
+On the final set the analyst would read 5 cases instead of 45 alerts, every one a real intrusion,
 at no cost in speed. The weakness: on this 5-server network both intrusions of a file name the
-same servers within 10 minutes, so on the final set every case holds both, and the 12 alerts that
+same servers within 10 minutes, so on the final set every case holds both, and the 7 alerts that
 were about no intrusion are folded into them instead of standing alone (O14).
 
 What each specialist can and cannot see:
@@ -1123,7 +1136,7 @@ count as false):
 |---|---|---|---|---|---|
 | **single fly** | 21 | 21 | **0** | **10** | +78 s |
 | **network fly** | 27 | 22 | 5 | 9 | **+36 s** |
-| identity fly | 27 | 25 | 2 | 10 | +260 s |
+| identity fly | 27 | 26 | 1 | 10 | +260 s |
 | dns fly | 13 | 10 | 3 | 10 | +610 s |
 | endpoint fly | 18 | 8 | 10 | 6 | +498 s |
 | count: processes | 10 | 10 | 0 | 10 | +428 s |
@@ -1137,10 +1150,12 @@ count as false):
 
 | detector | alarm episodes | about the attack | false | incidents named | median first naming |
 |---|---|---|---|---|---|
-| identity fly (Phase 9: counts only) | 12 | 5 | **7** | 2 | **+4415 s** |
+| identity fly (Phase 11: counts only, votes only with fan-out) | 10 | 4 | **6** | 2 | +6668 s |
+| identity fly (Phase 9: counts only) | 12 | 5 | 7 | 2 | +4415 s |
 | identity fly (Phase 8: names and counts) | 41 | 6 | 35 | 3 | +909 s |
-| dns fly | 73 | 1 | 72 | 1 | +9089 s |
-| single fly | 33 | 0 | 33 | 0 | |
+| dns fly (Phase 11: votes only with fan-out) | 0 | 0 | **0** | 0 | |
+| dns fly (before) | 73 | 1 | 72 | 1 | +9089 s |
+| single fly | 32 | 0 | 32 | 0 | |
 | endpoint fly | 44 | 0 | 44 | 0 | |
 | **count: failed users** | 45 | **33** | **12** | 2 | +4988 s |
 | count: users | 5 | 2 | 3 | 1 | +12372 s |
@@ -1155,10 +1170,11 @@ What it says:
 - **Where they lost: a rare signal in a big crowd.** On LANL the count of the identity fly's own
   input was far more precise (73% of its episodes about the attack, the fly's 15%): the fly reacted
   to new names, which a big network is full of (O16). Smelling only the counts (Phase 9) brought it
-  to 42% with 7 false episodes against the count's 12; the count still finds more episodes (33
-  against 5) and both name 2 of 6 incidents.
-- **The flies' false alarms on LANL** (184 episodes in 12 hours over four flies) come from
-  calibrating on one afternoon and watching mornings and other days.
+  to 42% with 7 false episodes against the count's 12, and voting only with fan-out (Phase 11) to
+  40% with 6; the count still finds far more episodes (33 against 4) and both name 2 of 6 incidents.
+- **The flies' false alarms on LANL** (184 episodes in 12 hours over four flies; 82 since Phase 11)
+  come from calibrating on one afternoon and watching mornings and other days. The 82 left are the
+  endpoint fly's busy servers (44, real fan-out: up to 109 processes a minute) and the single fly (32).
 - The isolation forest, a standard model, is the weakest detector in both worlds.
 
 Raw runs: `data/runs/p8/` (Phase 9 rows: `data/runs/p9f/`).
@@ -1195,10 +1211,74 @@ instead of 230. The endpoint fly gained little (O16).
 **Reported** (final sets, once): LANL final, identity fly 12 episodes, 5 about the attack, 7 false
 (before 41, 6, 35); synthetic final, rule D unchanged (+89 s, 20/50, 2 s), rule E +75 s, 26/50, 45 s
 (before +60 s, 24/50, 2 s), the identity fly 102 false seconds (before 0); holdout, every alert about
-an intrusion. The cost is noisier leads on the synthetic network.
+an intrusion. The cost is noisier leads on the synthetic network. (Phase 11's fan-out vote has
+moved these since: LANL identity 10, 4, 6; synthetic identity 94 false seconds.)
+
+**Tried and reverted:** giving the count-only fly every glomerulus, one separate block per count
+bucket. The readout rose with the count for the first time, but ordinary logons got 12 times
+noisier and LANL precision fell (O16).
 
 **Still to do in Phase 9:** integrating over time with circuits from the connectome, judged against
 the failed-users count on LANL.
+
+## Phase 11: explaining alerts
+
+Every JSON alert says why it fired, in terms an analyst can check against the logs:
+
+```json
+"why": ["identity fly at 1.7x its threshold: 7 distinct users failed to log in from 10.0.0.3 in 15 minutes"],
+"attack": ["T1110.003 Password Spraying"]
+```
+
+For each fly firing in that second: its evidence in multiples of its threshold, and the history
+count behind the suspect it blames: the most extreme count among its events of the last 20 s
+(`Player::suspects`, which now returns that count as a `Reason`). `detect::describe` turns it into
+a sentence and the technique it is consistent with:
+
+| count | sentence | ATT&CK |
+|---|---|---|
+| ports per source, 15 min | *S connected to N distinct ports in 15 minutes* | T1046 Network Service Discovery |
+| failed users per source, 15 min | *N distinct users failed to log in from S in 15 minutes* | T1110.003 Password Spraying |
+| processes per host, 1 min | *N distinct processes started on H in 1 minute* | T1569.002 Service Execution |
+| names per domain per host, 15 min | *H looked up N distinct names under one domain in 15 minutes* | T1048 Exfiltration Over Alternative Protocol (DNS) |
+
+A count of 0 or 1 is no fan-out: the sentence says the fly reacted to the event itself, a
+combination it has rarely smelled as safe, and claims no technique.
+
+**Checked by hand** (holdout and `cluster_final_31`, the first alert of each queue entry, 18
+entries): every technique matched the stage the label names (recon → T1046, spray → T1110.003,
+exfiltration → T1048), with counts that fit (scans of 30-46 ports, sprays of 7-13 accounts,
+tunnels of 37-47 names). Two things to know:
+- The single fly smells every kind and blames the largest raw count among them, so during an
+  exfiltration it can still cite the scan's 15-minute port count: true, but stale, and it adds
+  T1046 to the list. Counts of different kinds are not comparable; the specialists' sentences
+  are the ones to read.
+- An alert's entity (from the coordinator) and a sentence's subject (the fly's own suspect) can
+  differ: a spray alert on the target 10.0.1.3 explains that users failed from 10.0.0.15.
+
+**On LANL** (eval slices, every alarmed second in the per-fly log): every identity episode names
+`C17693` with 7-14 failed users in 15 minutes. Every one of the DNS fly's 25 false episodes said
+*no fan-out*: LANL's DNS records name computers, not domains, so the fly reacted to unfamiliar
+pairs, not to tunnels. The endpoint fly's say what an analyst would check: *109 distinct processes
+started on C14282 in 1 minute*, a busy server.
+
+**What the explanations changed: a fly votes only with fan-out.** Left out of the per-fly scoring,
+the no-fan-out alarms cost no attack episode on either eval set and removed all 25 false DNS
+episodes, so the coordinator now counts a fly as firing only when the count behind its suspects is
+at least 2 (`fan_out` in `cluster.rs`; its evidence keeps accumulating). Eval: rule D and E
+unchanged to the second (+87 s, +74 s), E's queue 89% to 91%. Final (reported once):
+
+| | before | fly votes only with fan-out |
+|---|---|---|
+| synthetic final, rule D | +89 s, 20/50, 2 s | the same |
+| synthetic final, rule E | +75 s, 26/50, 45 s | the same |
+| synthetic final queue, D | 48 alerts, 75% | **45 alerts, 84%** |
+| synthetic final queue, E | 72 alerts, 75% | **66 alerts, 82%** |
+| LANL final, false alarm episodes, all flies | 156 | **82** (DNS 72 to 0) |
+| LANL final, identity fly | 12 episodes, 5 attack, first +4415 s | 10, 4, first +6668 s |
+
+What is not explained yet: which readout neurons, Kenyon cells and glomeruli carried the alarm.
+That trace needs per-neuron spikes at alert time and belongs with Phase 6's view.
 
 ## Phase 10 design: a fly that sleeps
 
