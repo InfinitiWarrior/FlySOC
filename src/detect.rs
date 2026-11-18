@@ -177,7 +177,7 @@ pub const TRACED: [&str; 4] = ["ALPN", "Kenyon_Cell", "MBON", "LHLN"];
 pub const DETECT_ON: usize = 2;
 
 /// One line of JSON telemetry. `kind` says which fields are set; it defaults to "conn".
-#[derive(Deserialize, Default)]
+#[derive(Deserialize, Default, Clone)]
 pub struct Event {
     pub ts: f64,
     #[serde(default = "conn")]
@@ -200,6 +200,11 @@ fn conn() -> String {
 }
 
 impl Event {
+    /// Whether `who` (a host or user) takes part in this event.
+    pub fn involves(&self, who: &str) -> bool {
+        [&self.src, &self.dst, &self.user, &self.host].iter().any(|x| x.as_deref() == Some(who))
+    }
+
     /// The hosts and users this event is about, for linking alarms across flies.
     fn entities(&self) -> Vec<String> {
         let all = match self.kind.as_str() {
@@ -245,7 +250,7 @@ fn base_domain(q: &str) -> String {
 /// (low and slow) still adds up. Processes stay short: benign hosts cycle through all of theirs
 /// within minutes. (ISSUES E10)
 const HISTORY_S: f64 = 60.0;
-const LONG_HISTORY_S: f64 = 900.0;
+pub const LONG_HISTORY_S: f64 = 900.0;
 
 /// Sliding-window summaries of the telemetry stream, added to each event's odour as extra
 /// components. Single events of a scan or a password spray look ordinary; the pattern across
@@ -309,8 +314,9 @@ pub struct Seen {
     pub what: &'static str, // which count: "src_ports", "src_failed_users", ... ("" for none)
 }
 
-/// Why a fly blames its suspects: which history count was the most extreme among its recent
-/// events, and how high (the longest window's count). Phase 11.
+/// Why FlySOC suspects an entity when a fly fires: which history count was the most extreme among
+/// the fly's recent events, and how high (the longest window's count). Bookkeeping, not the fly's
+/// choice: whether the fly fired because of it is what `cluster::verify` tests. Phase 11.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Reason {
     pub what: &'static str,
@@ -427,7 +433,7 @@ pub struct Window {
     pub spikes: [u32; TRACED.len()],
     pub labels: Vec<String>,
     /// Entities behind the most extreme history count among this fly's events in the last
-    /// SUSPECT_S seconds: who to blame if the fly is alarmed.
+    /// SUSPECT_S seconds: who FlySOC names if the fly is alarmed (bookkeeping, not the fly's choice).
     pub suspects: Vec<String>,
     /// Why they are suspected (Phase 11).
     pub reason: Option<Reason>,
@@ -579,9 +585,30 @@ pub fn play(
     encs: &[Encoder],
     events: &[Event],
     seconds: usize,
+    learn: Option<&mut MushroomBody>,
+) -> Vec<Vec<Window>> {
+    play_primed(device, queue, sim, fly, encs, &[], events, seconds, learn)
+}
+
+/// `play`, after feeding `prime` (earlier events, negative times) to the history counts only, not
+/// to the flies: a replay of a stretch in the middle of a file sees the counts it would have had,
+/// without simulating everything before it (counterfactual attribution, `cluster::verify`).
+#[allow(clippy::too_many_arguments)]
+pub fn play_primed(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    sim: &Sim,
+    fly: &Fly,
+    encs: &[Encoder],
+    prime: &[Event],
+    events: &[Event],
+    seconds: usize,
     mut learn: Option<&mut MushroomBody>,
 ) -> Vec<Vec<Window>> {
     let mut player = Player::new(device, queue, sim, fly.n, encs, events);
+    prime.iter().for_each(|e| {
+        player.history.observe(e);
+    });
     let mut out: Vec<Vec<Window>> = (0..encs.len()).map(|_| Vec::with_capacity(seconds)).collect();
     while player.second() < seconds {
         let Some(labels) = player.step(device, queue, sim) else { continue };

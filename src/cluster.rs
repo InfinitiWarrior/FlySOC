@@ -342,6 +342,14 @@ pub fn run(fly: &Fly, syn: Synapses, train: &str, events: &str) -> Result<(), St
     let mut fired = vec![vec![false; seconds]; FLIES.len()]; // [fly][second]
     let mut cluster = vec![vec![false; seconds]; RULES.len()]; // [rule][second]
     let mut fly_log = String::new(); // FLYSOC_FLY_LOG: every alarmed second per fly: suspects, why
+    let (mut last_fly, mut last_entity) = (vec![None::<usize>; FLIES.len()], std::collections::HashMap::<String, usize>::new());
+    // the fly's own answer for fly f's suspect at second s (FLYSOC_VERIFY)
+    let check = |f: usize, s: usize| -> String {
+        match windows[f][s].suspects.first() {
+            Some(who) => verdict(FLIES[f].0, who, verify(&device, &queue, &c, &events, s, who)[f]),
+            None => format!("{}: no suspect to remove", FLIES[f].0),
+        }
+    };
     for s in 0..seconds {
         let mbon: Vec<u32> = windows.iter().map(|w| w[s].spikes[detect::DETECT_ON]).collect();
         let suspects: Vec<Vec<String>> = windows.iter().map(|w| w[s].suspects.clone()).collect();
@@ -351,7 +359,10 @@ pub fn run(fly: &Fly, syn: Synapses, train: &str, events: &str) -> Result<(), St
         if now.iter().any(|&x| x) && std::env::var("FLYSOC_FLY_LOG").is_ok() {
             let (why, _) = explain(&now, &coord, &windows, s);
             for (k, f) in (0..FLIES.len()).filter(|&f| now[f]).enumerate() {
-                fly_log += &format!("{s}\t{}\t{}\t{}\n", FLIES[f].0, suspects[f].join(","), why[k]);
+                let new_episode = last_fly[f].is_none_or(|t| s - t >= 60);
+                last_fly[f] = Some(s);
+                let answer = if verifying() && new_episode { check(f, s) } else { String::new() };
+                fly_log += &format!("{s}\t{}\t{}\t{}\t{answer}\n", FLIES[f].0, suspects[f].join(","), why[k]);
             }
         }
         for (r, (rule, _)) in RULES.iter().enumerate() {
@@ -362,8 +373,14 @@ pub fn run(fly: &Fly, syn: Synapses, train: &str, events: &str) -> Result<(), St
             let who: Vec<&str> = (0..SPECIALISTS).filter(|&f| now[f]).map(|f| FLIES[f].0).collect();
             let named = named(&now, &suspects, &entity);
             let (why, attack) = explain(&now, &coord, &windows, s);
-            let (why, attack) = (serde_json::to_string(&why).unwrap(), serde_json::to_string(&attack).unwrap());
-            println!(r#"{{"ts_start":{s},"ts_end":{},"kind":"{kind}","case":{case},"entity":"{entity}","confidence":{confidence:.2},"flies":{who:?},"named":{named:?},"why":{why},"attack":{attack},"truth":{truth:?}}}"#, s + 1);
+            let new_entry = last_entity.get(&entity).is_none_or(|&t| s - t >= 60);
+            last_entity.insert(entity.clone(), s);
+            let verified: Vec<String> = match verifying() && new_entry {
+                true => (0..FLIES.len()).filter(|&f| now[f]).map(|f| check(f, s)).collect(),
+                false => vec![],
+            };
+            let (why, attack, verified) = (serde_json::to_string(&why).unwrap(), serde_json::to_string(&attack).unwrap(), serde_json::to_string(&verified).unwrap());
+            println!(r#"{{"ts_start":{s},"ts_end":{},"kind":"{kind}","case":{case},"entity":"{entity}","confidence":{confidence:.2},"flies":{who:?},"named":{named:?},"why":{why},"attack":{attack},"verified":{verified},"truth":{truth:?}}}"#, s + 1);
         }
     }
     if let Ok(path) = std::env::var("FLYSOC_FLY_LOG") {
@@ -388,6 +405,53 @@ pub fn run(fly: &Fly, syn: Synapses, train: &str, events: &str) -> Result<(), St
         eprintln!("{:>13}  {}", format!("cluster {name}"), score(&labels, &cluster[r]));
     }
     Ok(())
+}
+
+/// Counterfactual attribution (Phase 11): the explanation names a suspect from FlySOC's
+/// bookkeeping; this asks the fly. The last VERIFY_S seconds before second `s` are replayed twice,
+/// with every event and without any event involving `who`, each after priming the history counts
+/// with the 15 minutes before (without `who` there too). Returns per role the evidence at `s` in
+/// multiples of its threshold: (with, without). The replay starts from a reset network, so "with"
+/// approximates the real run; the two replays share that approximation.
+const VERIFY_S: usize = 120;
+fn verify(device: &wgpu::Device, queue: &wgpu::Queue, c: &Cluster, events: &[Event], s: usize, who: &str) -> Vec<(f64, f64)> {
+    let start = s.saturating_sub(VERIFY_S);
+    let shift = |e: &Event| {
+        let mut e = e.clone();
+        e.ts -= start as f64;
+        e
+    };
+    let lo = start as f64 - detect::LONG_HISTORY_S;
+    let prime: Vec<Event> = events.iter().filter(|e| e.ts >= lo && e.ts < start as f64).map(shift).collect();
+    let stretch: Vec<Event> = events.iter().filter(|e| e.ts >= start as f64 && e.ts < (s + 1) as f64).map(shift).collect();
+    let without = |v: &[Event]| v.iter().filter(|e| !e.involves(who)).cloned().collect::<Vec<Event>>();
+    let seconds = s + 1 - start;
+    let strength = |prime: &[Event], stretch: &[Event]| -> Vec<f64> {
+        let w = pool(detect::play_primed(device, queue, &c.sim, &c.circuit, &c.encs, prime, stretch, seconds, None));
+        w.iter().enumerate().map(|(f, w)| evidence(w).last().copied().unwrap_or(0.0) / c.thresholds[f].max(f64::EPSILON)).collect()
+    };
+    let (a, b) = (strength(&prime, &stretch), strength(&without(&prime), &without(&stretch)));
+    a.into_iter().zip(b).collect()
+}
+
+/// FLYSOC_VERIFY=1: counterfactual-check every new queue entry (and, in the per-fly log, every
+/// fly's new alarm episode). Costs two replays of up to VERIFY_S seconds each.
+fn verifying() -> bool {
+    std::env::var("FLYSOC_VERIFY").is_ok_and(|v| v == "1")
+}
+
+/// The fly's own answer, as text: did it still fire without `who`?
+fn verdict(name: &str, who: &str, (with, without): (f64, f64)) -> String {
+    let answer = if with <= 1.0 {
+        "the replay does not reproduce the alarm: no answer"
+    } else if without <= 1.0 {
+        "confirmed: without it the fly stays below threshold"
+    } else if without < 0.5 * with {
+        "partly: without it the fly still fires, at less than half the strength"
+    } else {
+        "not confirmed: the fly fires about as strongly without it"
+    };
+    format!("{name}: {with:.1}x with {who}, {without:.1}x without; {answer}")
 }
 
 /// Whether a fly's suspects show fan-out: a count of at least 2 behind them. A fly with none
@@ -776,6 +840,26 @@ mod tests {
         assert!(c.strength(1) > 10.0, "but its evidence still accumulates: {}", c.strength(1));
         // once its suspects show fan-out, it fires at once: no waiting for the average to refill
         assert_eq!(c.second(100, &[100, 100], &sus, &[true, true]), [true, true]);
+    }
+
+    #[test]
+    fn the_fly_s_answer_reads_four_ways() {
+        // Phase 11: what a counterfactual replay says about a suspect
+        let v = |w, wo| verdict("network", "C9", (w, wo));
+        assert!(v(2.0, 0.4).contains("confirmed: without it the fly stays below threshold"), "{}", v(2.0, 0.4));
+        assert!(v(3.0, 1.2).contains("partly"), "{}", v(3.0, 1.2));
+        assert!(v(2.0, 1.9).contains("not confirmed"), "{}", v(2.0, 1.9));
+        assert!(v(0.8, 0.1).contains("does not reproduce the alarm"), "a replay below threshold cannot answer: {}", v(0.8, 0.1));
+        assert!(v(2.0, 0.4).starts_with("network: 2.0x with C9, 0.4x without;"), "{}", v(2.0, 0.4));
+    }
+
+    #[test]
+    fn removing_a_suspect_removes_every_event_it_takes_part_in() {
+        let e: Event = serde_json::from_str(r#"{"ts":1,"kind":"auth","src":"C1","dst":"C2","user":"U3"}"#).unwrap();
+        assert!(e.involves("C1") && e.involves("C2") && e.involves("U3"), "source, destination and user");
+        assert!(!e.involves("C4") && !e.involves("C"), "nothing else, and no prefixes");
+        let p: Event = serde_json::from_str(r#"{"ts":1,"kind":"proc","host":"C5","process":"P1"}"#).unwrap();
+        assert!(p.involves("C5") && !p.involves("P1"), "a process event by its host, not its process name");
     }
 
     #[test]

@@ -80,8 +80,10 @@ data set, are in [Real data](#real-data-lanl).
   count behind it, and which ATT&CK technique that fits; checked by hand on synthetic and LANL
   alerts ([Phase 11](#phase-11-explaining-alerts)). The explanations exposed that every false DNS
   alarm on LANL had no fan-out behind it; a fly now votes only with fan-out (O18): rule D's queue
-  on the synthetic final set rose from 75% to 84% precision, detection unchanged. The neural path
-  (which neurons carried an alarm) is left for Phase 6's view.
+  on the synthetic final set rose from 75% to 84% precision, detection unchanged. The sentences are
+  FlySOC's bookkeeping, not the fly's words; counterfactual replays ask the fly whether they name
+  the cause (identity fly: 25 of 27 confirmed on synthetic final). The neural path (which neurons
+  carried an alarm) is left for Phase 6's view.
 - Phase 6, not started beyond the viewer: the full 3D view.
 - Phase 7, not started: packaging.
 
@@ -130,7 +132,7 @@ cargo run --release -- bench   # 1 s of whole-brain fly time, headless
 cargo run --release -- detect --train data/telemetry/train.jsonl data/telemetry/baseline.jsonl data/telemetry/holdout.jsonl
 cargo run --release -- cluster data/telemetry/cluster_train.jsonl data/telemetry/cluster_holdout.jsonl
 cargo run --release -- watch data/telemetry/cluster_train.jsonl data/telemetry/cluster_holdout.jsonl
-cargo test --release            # 31 tests, below
+cargo test --release            # 33 tests, below
 ```
 
 `cargo test` checks the encoding (stable odours, history counts, the overlapping count code pinned
@@ -140,7 +142,8 @@ attacks restore) and sleep (max of the day and the floor, never lowering a weigh
 days, keeping what attacks taught, the floor falling with frequency, attack windows and spike
 counts not counted as harmless sightings, flies counting independently), the sharded readout (one threshold for busy
 and quiet shards, bursts standing out), explanations (every count's sentence and technique, no
-claim without fan-out, reasons carried through), the fan-out vote, and one GPU spike test (skipped without `data/fly.bin`).
+claim without fan-out, reasons carried through, the four verdicts of a counterfactual replay and
+which events involve a suspect), the fan-out vote, and one GPU spike test (skipped without `data/fly.bin`).
 The sleep and readout tests were checked against planted bugs (overwriting instead of restoring,
 min for max, wrong scaling, counting attack seconds or spikes, no reset, dividing by a constant):
 each fails at least one test.
@@ -184,6 +187,7 @@ DNS fly and the single fly red.
 of giving each all events, each measured against its own 30-minute background (O15, experimental).
 `FLYSOC_HISTORY_ONLY=<roles>` sets which roles smell only history counts (default `identity`;
 empty for none; Phase 9).
+`FLYSOC_VERIFY=1` checks each new alert's suspect by a counterfactual replay ([Phase 11](#phase-11-explaining-alerts)).
 `FLYSOC_CALIB=<file>` calibrates thresholds on another benign file (default
 `data/telemetry/cluster_calib.jsonl`; LANL uses its own weekday slice).
 
@@ -1230,10 +1234,12 @@ Every JSON alert says why it fired, in terms an analyst can check against the lo
 "attack": ["T1110.003 Password Spraying"]
 ```
 
-For each fly firing in that second: its evidence in multiples of its threshold, and the history
-count behind the suspect it blames: the most extreme count among its events of the last 20 s
-(`Player::suspects`, which now returns that count as a `Reason`). `detect::describe` turns it into
-a sentence and the technique it is consistent with:
+**Who says what.** The flies do not speak, and they do not pick their suspects. Only the first
+part of each sentence comes from the fly: its evidence (readout spikes, averaged) in multiples of
+its threshold. The rest is FlySOC's own bookkeeping, not the fly's: `History` counts what each fly
+was fed, and `Player::suspects` takes the most extreme count among the fly's events of the last
+20 s and its entities (returned as a `Reason`). `detect::describe` fills a fixed template with it
+and looks up the technique in a fixed table:
 
 | count | sentence | ATT&CK |
 |---|---|---|
@@ -1245,11 +1251,18 @@ a sentence and the technique it is consistent with:
 A count of 0 or 1 is no fan-out: the sentence says the fly reacted to the event itself, a
 combination it has rarely smelled as safe, and claims no technique.
 
+So a sentence is a correlation: *the fly fired, and around then this was the most extreme count it
+was fed*. It assumes the count is why. That holds best for the identity fly, which smells nothing
+but counts; flies that also smell names, ports or processes can fire for a reason the sentence does
+not name. The Phase 9 probe is the warning: the old identity fly answered a count of 1 and of 16
+the same, and its sentence would still have said 16. Counterfactual replays test the assumption
+(below).
+
 **Checked by hand** (holdout and `cluster_final_31`, the first alert of each queue entry, 18
 entries): every technique matched the stage the label names (recon → T1046, spray → T1110.003,
 exfiltration → T1048), with counts that fit (scans of 30-46 ports, sprays of 7-13 accounts,
 tunnels of 37-47 names). Two things to know:
-- The single fly smells every kind and blames the largest raw count among them, so during an
+- For the single fly, which smells every kind, the bookkeeping takes the largest raw count among them, so during an
   exfiltration it can still cite the scan's 15-minute port count: true, but stale, and it adds
   T1046 to the list. Counts of different kinds are not comparable; the specialists' sentences
   are the ones to read.
@@ -1276,6 +1289,42 @@ unchanged to the second (+87 s, +74 s), E's queue 89% to 91%. Final (reported on
 | synthetic final queue, E | 72 alerts, 75% | **66 alerts, 82%** |
 | LANL final, false alarm episodes, all flies | 156 | **82** (DNS 72 to 0) |
 | LANL final, identity fly | 12 episodes, 5 attack, first +4415 s | 10, 4, first +6668 s |
+
+**Asking the fly** (`FLYSOC_VERIFY=1`). A sentence names a cause from bookkeeping; a
+counterfactual replay asks the fly whether it is the cause. For each new queue entry and each
+fly's new alarm episode, the 120 s before the alarm are replayed twice from a reset network, after
+priming the history counts with the 15 minutes before: once with every event, once without any
+event involving the suspect (in the priming too). The fly's evidence at the alarm second, in
+multiples of its threshold, gives the verdict (`cluster::verify`, `verdict`):
+
+- *confirmed*: without the suspect the fly stays below threshold;
+- *partly*: it still fires, at less than half the strength;
+- *not confirmed*: it fires about as strongly without the suspect, so the sentence named the wrong
+  cause;
+- *no answer*: the short replay does not reproduce the alarm.
+
+The JSON alert carries the verdicts (`"verified"`), the per-fly log a fifth column. Two replays of
+120 s per new alert, not per second. Final sets (reported once; eval agreed):
+
+| fly | synthetic final: confirmed / not / no answer | LANL final |
+|---|---|---|
+| identity | **25** / 2 / 0 of 27 | 7 / 2 / 1 of 10 |
+| network | 22 / 5 / 0 of 27 | |
+| endpoint | 11 / 7 / 0 of 18 | 24 / 14 / 6 of 44 |
+| DNS | 10 / 2 / 1 of 13 | |
+| single fly | 17 / 1 / 3 of 21 | 21 / 5 / 8 of 34 |
+
+The count-only identity fly is confirmed most: nothing but counts can drive it. Flies that also
+smell names or processes are confirmed less, the endpoint fly least.
+
+**A confirmation checks the cause, not the intent.** On synthetic final, unconfirmed alarm episodes
+are 13 of 17 false (confirmed: 20 of 85). On LANL, confirmed episodes are 50 of 52 false: the
+endpoint fly's *109 processes on C14282 in 1 minute* is confirmed, that busy server is why the fly
+fired, but nothing labelled says it is an attack. And demoting unconfirmed entries in the cluster
+queue does not help (eval, rule D: 4 entries demoted, all 4 about an intrusion; precision 93% to
+92%): a cluster alert already needs two flies naming the entity, so a fly whose own cause is wrong
+is usually still pointing at the right host. Verification therefore informs the analyst; it does
+not gate alerts (ISSUES M12).
 
 What is not explained yet: which readout neurons, Kenyon cells and glomeruli carried the alarm.
 That trace needs per-neuron spikes at alert time and belongs with Phase 6's view.

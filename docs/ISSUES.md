@@ -346,6 +346,23 @@ unchanged. Raw runs: `data/runs/p11g/`, `p11f/`.
 **Lesson**: an explanation is also a measurement. Reading why each false alarm fired found a
 rule in one pass that four rounds of tuning the circuit had not.
 
+### M12. Explanations named a cause the fly had not been asked about (P11)
+**Symptom**: Phase 11's sentences ("9 distinct users failed to log in from C17693") read as the
+fly's reason, but they come from FlySOC's history bookkeeping: the most extreme count among the
+fly's recent events. Phase 9's probe had shown a fly can fire for something else (names) while the
+count beside it is high.
+**Fix**: say so (README "Who says what"), and ask the fly: `FLYSOC_VERIFY=1` replays the 120 s
+before an alarm with and without the suspect's events (history primed with the 15 minutes before)
+and reports whether the fly still fires (`cluster::verify`). Final sets: the identity fly is
+confirmed in 25 of 27 synthetic episodes and 7 of 10 on LANL; the endpoint fly in 11 of 18 and 24
+of 44.
+**Tried**: demoting unconfirmed cluster alerts. Unconfirmed per-fly episodes are mostly false
+(synthetic eval 8 of 9, final 13 of 17), but in the queue the 4 demoted rule D entries were all
+about intrusions (93% to 92%): corroboration already fixes the entity. Not adopted.
+**Lesson**: a confirmation tests the cause, not the intent. On LANL 50 of 52 confirmed episodes
+are false: the fly really did fire because a server started 109 processes; that server is busy,
+not compromised.
+
 ## Solved: simulation and GPU
 
 ### S1. Pull-based simulation was too slow (P0)
