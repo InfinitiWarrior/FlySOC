@@ -66,6 +66,10 @@ fn history_only() -> Vec<String> {
     let v = std::env::var("FLYSOC_HISTORY_ONLY").unwrap_or_else(|_| HISTORY_ONLY.into());
     v.split(',').filter(|r| !r.is_empty()).map(str::to_string).collect()
 }
+/// FLYSOC_SLEEP=1: after training, the flies sleep (Phase 10, `MushroomBody::sleep`).
+fn sleeps() -> bool {
+    std::env::var("FLYSOC_SLEEP").is_ok_and(|v| v == "1")
+}
 const EVIDENCE_S: f64 = 20.0;
 const MEMORY_S: usize = 3 * EVIDENCE_S as usize; // how long the evidence average remembers
 const QUORUM: usize = 2;
@@ -111,7 +115,7 @@ pub fn build(device: &wgpu::Device, queue: &wgpu::Queue, circuit: Fly, syn: Syna
     let calib_bytes = std::fs::read(&calib_path).map_err(|e| format!("{calib_path}: {e} (run tools/gen_intrusion.py)"))?;
     let exe = std::env::current_exe().and_then(std::fs::read).unwrap_or_default();
     let key = detect::fnv(&train_bytes) ^ detect::fnv(&exe).rotate_left(1) ^ detect::fnv(&calib_bytes).rotate_left(2);
-    let cache = format!("data/cache/cluster{k}{}{}-{key:016x}.bin", if sharded() { "s" } else { "" }, history_only().join("+"));
+    let cache = format!("data/cache/cluster{k}{}{}-{key:016x}.bin", if sharded() { "s" } else { "" }, history_only().join("+") + if sleeps() { "z" } else { "" });
     if let Some((w, thresholds)) = load_cache(&cache, mb.plastic.w.len(), FLIES.len()) {
         sim.set_plastic(queue, &w);
         eprintln!("loaded the trained cluster from {cache}");
@@ -123,6 +127,11 @@ pub fn build(device: &wgpu::Device, queue: &wgpu::Queue, circuit: Fly, syn: Syna
     let t = std::time::Instant::now();
     eprintln!("training {k} flies ({n} neurons each) on {secs} s of telemetry (cached afterwards)...");
     detect::play(device, queue, &sim, &circuit, &encs, &train, secs, Some(&mut mb));
+    if sleeps() {
+        mb.sleep();
+        sim.set_plastic(queue, &mb.plastic.w);
+        eprintln!("  slept: output weights set from how often each Kenyon cell fired in safe seconds");
+    }
     eprintln!("  trained in {:.1} s; calibrating thresholds on a replay...", t.elapsed().as_secs_f32());
     let t = std::time::Instant::now();
     let replay = pool(detect::play(device, queue, &sim, &circuit, &encs, &train, secs, None));
@@ -686,5 +695,74 @@ impl Driver for Watch {
         if key == "r" {
             self.restart(device, queue);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A shard's windows with these readout spikes per second.
+    fn shard(spikes: &[u32]) -> Vec<detect::Window> {
+        spikes
+            .iter()
+            .map(|&s| {
+                let mut w = detect::Window { spikes: [0; detect::TRACED.len()], labels: vec![], suspects: vec![] };
+                w.spikes[detect::DETECT_ON] = s;
+                w
+            })
+            .collect()
+    }
+
+    fn readout(spikes: &[u32]) -> Vec<u32> {
+        let mut w = shard(spikes);
+        relative(&mut w);
+        w.iter().map(|w| w.spikes[detect::DETECT_ON]).collect()
+    }
+
+    #[test]
+    fn a_silent_shard_reads_zero() {
+        assert!(readout(&[0; 600]).iter().all(|&r| r == 0), "no spikes, no evidence");
+    }
+
+    #[test]
+    fn a_steady_background_reads_the_same_whatever_its_level() {
+        // O15: a busy shard (100 spikes/s) and a quiet one (10/s) must settle near the same readout,
+        // RELATIVE_SCALE x b / (b + 1), so one threshold serves both
+        let settle = |b: u32| *readout(&vec![b; 3600]).last().unwrap() as f64;
+        let (quiet, busy) = (settle(10), settle(100));
+        let want = |b: f64| RELATIVE_SCALE * b / (b + 1.0);
+        assert!((quiet - want(10.0)).abs() <= 1.0, "quiet shard settles at {quiet}, want ~{:.1}", want(10.0));
+        assert!((busy - want(100.0)).abs() <= 1.0, "busy shard settles at {busy}, want ~{:.1}", want(100.0));
+        assert!((busy - quiet).abs() <= 1.0, "busy {busy} vs quiet {quiet}: background level leaks into the readout");
+    }
+
+    #[test]
+    fn a_burst_stands_out_from_its_own_background() {
+        // an hour at 10 spikes/s, then 60 s at 100/s: the readout must rise well above where it sat,
+        // and a busy shard at a steady 100/s must not read like that burst
+        let mut s = vec![10u32; 3600];
+        s.extend(vec![100u32; 60]);
+        let r = readout(&s);
+        let before = r[3599] as f64;
+        let peak = *r[3600..].iter().max().unwrap() as f64;
+        assert!(peak > 3.0 * before, "burst peak {peak} not well above background {before}");
+        let steady_busy = *readout(&vec![100; 3660]).last().unwrap() as f64;
+        assert!(peak > 3.0 * steady_busy, "a burst ({peak}) must outshine a shard that is always busy ({steady_busy})");
+    }
+
+    #[test]
+    fn the_background_forgets_slowly_and_the_evidence_quickly() {
+        // after a burst ends, the readout falls back within a few evidence windows, while the
+        // background (BACKGROUND_S) has barely moved, so a second burst still stands out
+        let mut s = vec![10u32; 3600];
+        s.extend(vec![100u32; 60]);
+        s.extend(vec![10u32; 6 * EVIDENCE_S as usize]);
+        s.extend(vec![100u32; 60]);
+        let r = readout(&s);
+        let settled = r[3600 + 60 + 6 * EVIDENCE_S as usize - 1] as f64;
+        let second = *r[r.len() - 60..].iter().max().unwrap() as f64;
+        assert!(settled < 2.0 * r[3599] as f64, "readout {settled} has not fallen back after the burst");
+        assert!(second > 3.0 * r[3599] as f64, "a second burst ({second}) no longer stands out");
     }
 }

@@ -90,7 +90,16 @@ pub fn circuit(fly: &Fly, syn: &Synapses) -> (Fly, Synapses) {
 pub struct MushroomBody {
     pub plastic: Plastic,
     w0: Vec<f32>,
+    /// Since the last sleep, per plastic synapse: safe windows seen, and those in which its
+    /// Kenyon cell fired. Sleep turns them into a frequency (Phase 10).
+    safe: Vec<u32>,
+    seen: Vec<u32>,
 }
+
+/// Sleep's rarity scale: a Kenyon cell active in this fraction of safe windows is restored to at
+/// least 1/e of its resting output weight; rarer cells to more, commoner ones to less. The
+/// thresholds' calm quantile (cluster.rs CALM_QUANTILE 0.995) draws the same line: once in 200 s.
+const RARE: f32 = 0.005;
 
 impl MushroomBody {
     pub fn split(fly: &Fly, syn: Synapses) -> (Synapses, Self) {
@@ -98,12 +107,13 @@ impl MushroomBody {
         let (fixed, mut plastic) = syn.split(|pre, post| kc[pre as usize] && mbon[post as usize]);
         plastic.w.iter_mut().for_each(|w| *w *= INIT_GAIN);
         let w0 = plastic.w.clone();
-        (fixed, Self { plastic, w0 })
+        let n = w0.len();
+        (fixed, Self { plastic, w0, safe: vec![0; n], seen: vec![0; n] })
     }
 
     /// `k` independent copies, one per fly, for a simulation holding `k` circuits of `n` neurons.
     pub fn replicate(&self, k: usize, n: u32) -> Self {
-        Self { plastic: self.plastic.replicate(k, n), w0: self.w0.repeat(k) }
+        Self { plastic: self.plastic.replicate(k, n), w0: self.w0.repeat(k), safe: self.safe.repeat(k), seen: self.seen.repeat(k) }
     }
 
     /// The plastic synapses of fly `f` (its Kenyon cells are neurons f*n .. (f+1)*n).
@@ -119,6 +129,10 @@ impl MushroomBody {
         for j in range {
             p.w[j] += (self.w0[j] - p.w[j]) * RECOVERY;
             let a = fired[p.pre[j] as usize] as f32;
+            if safe {
+                self.safe[j] += 1;
+                self.seen[j] += (a > 0.0) as u32;
+            }
             if a > 0.0 {
                 p.w[j] = match safe {
                     true => p.w[j] * (1.0 - LR_SAFE).powf(a),
@@ -129,6 +143,28 @@ impl MushroomBody {
     }
 }
 
+
+impl MushroomBody {
+    /// Sleep (Phase 10): every output synapse is restored to at least w0 * exp(-f / RARE), f being
+    /// how often its Kenyon cell fired in safe windows since the last sleep. It only gives weight
+    /// back: what attacks and common patterns taught by day stays, while a pattern met harmlessly
+    /// once or twice is no longer silenced for good. (Overwriting the day's weights instead
+    /// destroyed what attacks taught: ISSUES O17.) Fruit fly synapses are rescaled in sleep (Bushey
+    /// et al. 2011); restoring by rarity is our model of it, not a measured rule.
+    pub fn sleep(&mut self) {
+        for j in 0..self.w0.len() {
+            let f = self.seen[j] as f32 / self.safe[j].max(1) as f32;
+            self.plastic.w[j] = self.plastic.w[j].max(self.floor(j, f));
+        }
+        self.safe.iter_mut().for_each(|x| *x = 0);
+        self.seen.iter_mut().for_each(|x| *x = 0);
+    }
+
+    /// The weight sleep restores synapse `j` to at least, for a safe-window frequency `f`.
+    fn floor(&self, j: usize, f: f32) -> f32 {
+        self.w0[j] * (-f / RARE).exp()
+    }
+}
 
 fn member(fly: &Fly, class: &str) -> Vec<bool> {
     let mut v = vec![false; fly.n as usize];
@@ -634,7 +670,7 @@ mod tests {
     fn safe_windows_depress_active_synapses_attacks_restore_them() {
         // neuron 0 is a Kenyon cell with one plastic synapse onto neuron 1
         let plastic = Plastic { row_ptr: vec![0, 1, 1], pre: vec![0], post: vec![1], w: vec![10.0] };
-        let mut mb = MushroomBody { plastic, w0: vec![10.0] };
+        let mut mb = MushroomBody { plastic, w0: vec![10.0], safe: vec![0], seen: vec![0] };
         mb.learn(&[0, 5], true, 0..1);
         assert!(mb.plastic.w[0] == 10.0, "a silent Kenyon cell learns nothing");
         mb.learn(&[5, 0], true, 0..1);
@@ -644,5 +680,350 @@ mod tests {
         assert!(mb.plastic.w[0] > depressed && mb.plastic.w[0] <= 10.0);
         assert!(is_safe(&["benign".into(), "benign_burst@40".into()]));
         assert!(!is_safe(&["benign".into(), "portscan@60".into()]));
+    }
+
+    /// A tiny fly: neurons 0-2 are ORN type A, 3-4 type B, 5-6 type C, 7 is not olfactory. With
+    /// three glomeruli one (C, neurons 5-6) is reserved for history, fields hash into A and B.
+    fn tiny_fly() -> Fly {
+        Fly {
+            n: 8,
+            pos: vec![],
+            class: vec![],
+            cell_class: vec![0, 0, 0, 0, 0, 0, 0, 1],
+            cell_type: vec![0, 0, 0, 1, 1, 2, 2, 3],
+            names: Names { cell_class: vec!["olfactory".into(), "other".into()], cell_type: vec![] },
+        }
+    }
+
+    fn conn(src: &str, port: u16) -> Event {
+        Event { kind: "conn".into(), src: Some(src.into()), dport: Some(port), ..Default::default() }
+    }
+
+    fn odour(enc: &Encoder, e: &Event, history: &[String]) -> Option<Vec<u32>> {
+        enc.neurons(e, history).map(|n| n.collect())
+    }
+
+    #[test]
+    fn shards_split_every_event_to_exactly_one_individual() {
+        // O15: with n shards, each event is smelled by exactly one of them, chosen by its origin
+        // (the source, or the host for process and DNS events), the same every time
+        let fly = tiny_fly();
+        for n in [2, 3, 10] {
+            let shards: Vec<Encoder> = (0..n).map(|k| Encoder::new(&fly, &["conn", "proc"]).shard(k, n)).collect();
+            for i in 0..200 {
+                let e = conn(&format!("C{i}"), 445);
+                let who: Vec<usize> = (0..n).filter(|&k| odour(&shards[k], &e, &[]).is_some()).collect();
+                assert_eq!(who.len(), 1, "{n} shards, source C{i}: smelled by {who:?}, expected exactly one");
+                let again: Vec<usize> = (0..n).filter(|&k| odour(&shards[k], &e, &[]).is_some()).collect();
+                assert_eq!(who, again, "the same source always lands on the same shard");
+                // a different port from the same source stays with that source's shard
+                let other_port = conn(&format!("C{i}"), 22);
+                assert!(odour(&shards[who[0]], &other_port, &[]).is_some(), "shards split by source, not by port");
+                // a process event is split by its host
+                let p = Event { kind: "proc".into(), host: Some(format!("C{i}")), process: Some("P1".into()), ..Default::default() };
+                assert_eq!((0..n).filter(|&k| odour(&shards[k], &p, &[]).is_some()).count(), 1, "host C{i}: one shard");
+            }
+            // every shard gets some of 200 sources: the split is not degenerate
+            for k in 0..n {
+                assert!((0..200).any(|i| odour(&shards[k], &conn(&format!("C{i}"), 445), &[]).is_some()), "shard {k} of {n} smells nothing");
+            }
+        }
+    }
+
+    #[test]
+    fn one_shard_is_the_unsharded_fly() {
+        let fly = tiny_fly();
+        let (plain, one) = (Encoder::new(&fly, &["conn"]), Encoder::new(&fly, &["conn"]).shard(0, 1));
+        for i in 0..50 {
+            let e = conn(&format!("10.0.0.{i}"), 80 + i as u16);
+            assert_eq!(odour(&plain, &e, &[]), odour(&one, &e, &[]), "shard 0 of 1 must smell exactly like the plain fly");
+        }
+    }
+
+    #[test]
+    fn history_only_smells_how_many_not_who() {
+        // Phase 9: the identity fly smells only history components. Different names with the same
+        // counts must smell identical; the fields' glomeruli (neurons 0-4) are never touched.
+        let fly = tiny_fly();
+        let enc = Encoder::new(&fly, &["conn"]).history_only();
+        let full = Encoder::new(&fly, &["conn"]);
+        let h = |b: u32| vec![format!("src_ports={b}")];
+        assert_eq!(odour(&enc, &conn("C1", 445), &[]), Some(vec![]), "no history, no odour: names alone smell of nothing");
+        for b in 0..6 {
+            let a = odour(&enc, &conn("C1", 445), &h(b)).unwrap();
+            let z = odour(&enc, &conn("C99999", 3389), &h(b)).unwrap();
+            assert_eq!(a, z, "bucket {b}: two different sources with the same count must smell the same");
+            assert!(!a.is_empty(), "bucket {b}: history lights its reserved glomerulus");
+            assert!(a.iter().all(|&n| n == 5 || n == 6), "bucket {b}: {a:?} touches a field glomerulus");
+        }
+        // the full fly does tell the two sources apart, which is what drowned the counts (O16)
+        assert!((0..50).any(|i| odour(&full, &conn(&format!("C{i}"), 445), &[]) != odour(&full, &conn("C1", 445), &[])));
+        // other kinds still pass by
+        assert!(odour(&enc, &Event { kind: "dns".into(), ..Default::default() }, &h(3)).is_none());
+    }
+
+    /// `k` Kenyon cells (neurons 0..k), each with one plastic synapse onto neuron k, resting at `w0`.
+    fn body(w0: &[f32]) -> MushroomBody {
+        let k = w0.len() as u32;
+        let mut row_ptr: Vec<u32> = (0..=k).collect();
+        row_ptr.push(k);
+        let plastic = Plastic { row_ptr, pre: (0..k).collect(), post: vec![k; k as usize], w: w0.to_vec() };
+        MushroomBody { plastic, w0: w0.to_vec(), safe: vec![0; k as usize], seen: vec![0; k as usize] }
+    }
+
+    /// Spikes per neuron for one window: `cells` fire `spikes` each, everyone else is silent.
+    fn spikes(n: usize, cells: &[usize], spikes: u32) -> Vec<u32> {
+        let mut v = vec![0; n + 1];
+        cells.iter().for_each(|&c| v[c] = spikes);
+        v
+    }
+
+    /// The restore floor: w0 * exp(-(seen / safe) / RARE).
+    fn floor(w0: f32, seen: u32, safe: u32) -> f32 {
+        w0 * (-(seen as f32 / safe as f32) / RARE).exp()
+    }
+
+    fn close(a: f32, b: f32) -> bool {
+        (a - b).abs() <= 1e-4 * b.abs().max(1e-6)
+    }
+
+    /// Sets a synapse's day by hand: its weight at nightfall and its counts.
+    fn day(mb: &mut MushroomBody, j: usize, w: f32, seen: u32, safe: u32) {
+        mb.plastic.w[j] = w;
+        mb.seen[j] = seen;
+        mb.safe[j] = safe;
+    }
+
+    #[test]
+    fn sleep_restores_rare_patterns_and_leaves_common_ones_down() {
+        // two Kenyon cells: cell 0 fires in 1 of 1000 safe windows, cell 1 in half of them
+        let mut mb = body(&[10.0, 10.0]);
+        for t in 0..1000 {
+            let mut f = spikes(2, &[], 0);
+            f[0] = (t == 999) as u32 * 5; // once, at the end of the day: no time to recover by day
+            f[1] = (t % 2) as u32;
+            mb.learn(&f, true, 0..2);
+        }
+        let (rare_day, common_day) = (mb.plastic.w[0], mb.plastic.w[1]);
+        mb.sleep();
+        let (rare, common) = (mb.plastic.w[0], mb.plastic.w[1]);
+        assert!(rare > 8.0 && rare > rare_day, "seen once in 1000: restored from {rare_day} to most of its weight, got {rare}");
+        // by day the per-window recovery holds a cell seen every other window near 0.35 (of 10);
+        // sleep's floor for f = 0.5 is ~0, so it leaves it exactly where the day did
+        assert!(common < 1.0 && common == common_day, "seen in half: stays where the day left it ({common_day} -> {common})");
+        assert_eq!(mb.seen, [0, 0], "counts start again after sleep");
+        assert_eq!(mb.safe, [0, 0], "safe-window counts start again after sleep");
+    }
+
+    #[test]
+    fn sleep_is_the_max_of_the_day_and_the_floor() {
+        // w <- max(w_day, w0 exp(-f / RARE)), for day weights below, at and above the floor
+        let fs: [(u32, u32); 6] = [(0, 2000), (1, 2000), (5, 2000), (10, 2000), (100, 2000), (2000, 2000)];
+        for &(seen, safe) in &fs {
+            let fl = floor(7.5, seen, safe);
+            for w_day in [0.0001, fl * 0.5, fl, (fl + 7.5) / 2.0, 7.5] {
+                let mut mb = body(&[7.5]);
+                day(&mut mb, 0, w_day, seen, safe);
+                mb.sleep();
+                let want = w_day.max(fl);
+                assert!(close(mb.plastic.w[0], want), "seen {seen}/{safe}, day weight {w_day}: got {}, want {want}", mb.plastic.w[0]);
+            }
+        }
+    }
+
+    #[test]
+    fn sleep_never_lowers_a_weight() {
+        // pseudo-random days: random firing, spike counts, labels and resting weights; every weight
+        // after sleep is at least its weight before, and finite in [0, w0]
+        let mut x: u64 = 0x9E3779B97F4A7C15;
+        let mut rnd = || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        for d in 0..20 {
+            let n = 40;
+            let w0: Vec<f32> = (0..n).map(|_| 0.01 + (rnd() % 1000) as f32 / 10.0).collect();
+            let mut mb = body(&w0);
+            for _ in 0..(1 + rnd() % 3000) {
+                let f: Vec<u32> = (0..=n).map(|_| if rnd() % 4 == 0 { (rnd() % 20) as u32 } else { 0 }).collect();
+                mb.learn(&f, rnd() % 10 != 0, 0..n);
+            }
+            let before = mb.plastic.w.clone();
+            mb.sleep();
+            for c in 0..n {
+                let w = mb.plastic.w[c];
+                assert!(w >= before[c], "day {d}, cell {c}: sleep lowered {} to {w}", before[c]);
+                assert!(w.is_finite() && w >= 0.0 && w <= w0[c], "day {d}, cell {c}: weight {w} outside [0, {}]", w0[c]);
+            }
+        }
+    }
+
+    #[test]
+    fn a_cell_active_in_exactly_rare_of_safe_windows_is_restored_to_one_over_e() {
+        let safe = (1.0 / RARE).round() as u32 * 10; // 2000 for RARE = 0.005
+        let mut mb = body(&[1.0]);
+        day(&mut mb, 0, 0.0, safe / 200, safe); // f = 1/200 = RARE, silenced by day
+        mb.sleep();
+        assert!(close(mb.plastic.w[0], (-1.0f32).exp()), "f = RARE should restore w0/e = 0.3679, got {}", mb.plastic.w[0]);
+    }
+
+    #[test]
+    fn the_floor_falls_strictly_as_frequency_rises() {
+        // every cell silenced by day: what sleep gives back falls strictly with frequency
+        let n = 30;
+        let mut mb = body(&vec![10.0; n]);
+        for c in 0..n {
+            day(&mut mb, c, 0.0, 3 * c as u32, 3000);
+        }
+        mb.sleep();
+        let w = &mb.plastic.w;
+        for c in 1..n {
+            assert!(w[c] < w[c - 1], "cell {c} (more frequent) restored to {} not below cell {} ({})", w[c], c - 1, w[c - 1]);
+        }
+        assert_eq!(w[0], 10.0, "a cell never seen is restored to its resting weight exactly");
+    }
+
+    #[test]
+    fn sleep_leaves_what_attacks_taught() {
+        // the O17 lesson: a cell restored by day during attacks but common in safe seconds keeps
+        // its day weight; the overwrite version silenced it
+        let mut mb = body(&[10.0]);
+        day(&mut mb, 0, 9.0, 500, 1000); // f = 0.5: floor ~0, but the day left it at 9
+        mb.sleep();
+        assert_eq!(mb.plastic.w[0], 9.0, "sleep must not take away weight the day left");
+    }
+
+    #[test]
+    fn attack_windows_do_not_count_as_harmless() {
+        // cell 0 fires only during attacks, cell 1 only in safe windows (half of them)
+        let mut mb = body(&[10.0, 10.0]);
+        for t in 0..1000 {
+            let safe = t % 10 != 0; // 100 attack windows, 900 safe
+            let cells: Vec<usize> = if safe { if t % 2 == 1 { vec![1] } else { vec![] } } else { vec![0] };
+            mb.learn(&spikes(2, &cells, 4), safe, 0..2);
+        }
+        assert_eq!(mb.safe, [900, 900], "only the 900 safe windows are counted, for every synapse");
+        assert_eq!(mb.seen[0], 0, "firing in attack windows is not a harmless sighting");
+        mb.sleep();
+        assert_eq!(mb.plastic.w[0], 10.0, "a cell only ever active during attacks keeps its full weight");
+        assert!(mb.plastic.w[1] < 1.0, "a cell active in half the safe windows stays far below rest: {}", mb.plastic.w[1]);
+    }
+
+    #[test]
+    fn several_spikes_in_one_window_are_one_sighting() {
+        // frequency is over windows, not spikes: 1 spike or 50 in a window count the same
+        let mut mb = body(&[10.0, 10.0]);
+        for t in 0..1000 {
+            let mut f = spikes(2, &[], 0);
+            if t < 3 {
+                f[0] = 1;
+                f[1] = 50;
+            }
+            mb.learn(&f, true, 0..2);
+        }
+        assert_eq!(mb.seen, [3, 3]);
+        assert_eq!(mb.safe, [1000, 1000]);
+        // same counts, so the same floor: silence both by hand and compare what sleep restores
+        mb.plastic.w = vec![0.0, 0.0];
+        mb.sleep();
+        assert_eq!(mb.plastic.w[0], mb.plastic.w[1], "spike counts within a window must not change the floor");
+        assert!(close(mb.plastic.w[0], floor(10.0, 3, 1000)));
+    }
+
+    #[test]
+    fn one_harmless_sighting_no_longer_blinds_the_fly() {
+        // the bug sleep fixes (O16): by day, a single harmless sighting with several spikes cuts a
+        // synapse by (1 - LR_SAFE)^spikes at once; at night that pattern is rare, so it is restored
+        let mut mb = body(&[10.0]);
+        for _ in 0..999 {
+            mb.learn(&spikes(1, &[], 0), true, 0..1);
+        }
+        mb.learn(&spikes(1, &[0], 5), true, 0..1); // seen once, at the end of the day
+        let awake = mb.plastic.w[0];
+        assert!(awake < 6.0, "by day one sighting of 5 spikes leaves {awake} (10 x 0.9^5 = 5.9)");
+        mb.sleep();
+        let slept = mb.plastic.w[0];
+        assert!(close(slept, floor(10.0, 1, 1000)), "after sleep: {slept}, want {}", floor(10.0, 1, 1000));
+        assert!(slept > awake + 2.0, "sleep must give the rare pattern back most of its weight: {awake} -> {slept}");
+    }
+
+    #[test]
+    fn a_pattern_absent_today_is_fully_restored_tonight() {
+        // day 1: cell 0 common (stays down). Day 2: cell 0 silent, cell 1 common. The second night
+        // sees only day 2: cell 0 was never seen, so it is restored to rest; cell 1 stays down.
+        let mut mb = body(&[10.0, 10.0]);
+        for t in 0..1000 {
+            mb.learn(&spikes(2, if t % 2 == 0 { &[0] } else { &[] }, 1), true, 0..2);
+        }
+        mb.sleep();
+        assert!(mb.plastic.w[0] < 1.0 && mb.plastic.w[1] == 10.0, "after day 1: {:?}", mb.plastic.w);
+        for t in 0..1000 {
+            mb.learn(&spikes(2, if t % 2 == 0 { &[1] } else { &[] }, 1), true, 0..2);
+        }
+        mb.sleep();
+        assert!(mb.plastic.w[0] == 10.0 && mb.plastic.w[1] < 1.0, "after day 2: {:?}", mb.plastic.w);
+    }
+
+    #[test]
+    fn a_day_without_harmless_windows_leaves_every_weight_at_rest() {
+        // no safe window at all (everything labelled attack): no frequency, no division by zero
+        let mut mb = body(&[3.0, 4.0]);
+        for _ in 0..100 {
+            mb.learn(&spikes(2, &[0, 1], 2), false, 0..2);
+        }
+        mb.sleep();
+        assert_eq!(mb.plastic.w, [3.0, 4.0]);
+        // and sleeping twice in a row, with nothing in between, changes nothing
+        mb.sleep();
+        assert_eq!(mb.plastic.w, [3.0, 4.0]);
+    }
+
+    #[test]
+    fn the_floor_scales_with_each_synapse_s_resting_weight() {
+        // three cells with the same counts but resting weights 1, 10, 100, all silenced by day:
+        // each is restored to the same fraction of its own resting weight
+        let mut mb = body(&[1.0, 10.0, 100.0]);
+        for c in 0..3 {
+            day(&mut mb, c, 0.0, 4, 1000);
+        }
+        mb.sleep();
+        let kept: Vec<f32> = (0..3).map(|c| mb.plastic.w[c] / mb.w0[c]).collect();
+        assert!(close(kept[0], kept[1]) && close(kept[1], kept[2]), "fractions restored differ: {kept:?}");
+    }
+
+    #[test]
+    fn replicated_flies_count_and_sleep_independently() {
+        // two flies of 3 neurons each (2 Kenyon cells onto neuron 2); only fly 0 lives a day
+        let one = body(&[10.0, 10.0]);
+        let mut mb = one.replicate(2, 3);
+        assert_eq!(mb.w0.len(), 4);
+        let r0 = mb.of_fly(0, 3);
+        assert_eq!(r0, 0..2);
+        for t in 0..1000 {
+            let mut f = vec![0u32; 6];
+            f[0] = (t % 2) as u32; // fly 0, cell 0: common
+            f[3] = (t % 2) as u32; // fly 1, cell 0 fires too, but fly 1 does not learn
+            mb.learn(&f, true, r0.clone());
+        }
+        assert_eq!(&mb.safe[2..], [0, 0], "fly 1 counted windows it never learned from");
+        mb.sleep();
+        assert!(mb.plastic.w[0] < 1.0, "fly 0's common cell stays far below rest: {}", mb.plastic.w[0]);
+        assert_eq!(mb.plastic.w[1], 10.0, "fly 0's silent cell kept");
+        assert_eq!(&mb.plastic.w[2..], [10.0, 10.0], "fly 1 had no day: its weights stay at rest");
+    }
+
+    #[test]
+    fn learning_still_works_the_morning_after() {
+        // after sleep the ordinary rule runs again from the slept weights
+        let mut mb = body(&[10.0]);
+        mb.sleep();
+        mb.learn(&spikes(1, &[0], 2), true, 0..1);
+        assert!(mb.plastic.w[0] < 10.0, "a safe sighting still depresses by day");
+        let low = mb.plastic.w[0];
+        mb.learn(&spikes(1, &[0], 2), false, 0..1);
+        assert!(mb.plastic.w[0] > low, "an attack still restores by day");
+        assert_eq!(mb.seen, [1], "and the new day is being counted");
     }
 }

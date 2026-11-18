@@ -95,6 +95,142 @@ theorem train_bounded {ρ ηs ηr w0 : ℝ}
   | nil => intro w hw; exact hw
   | cons s l ih => intro w hw; exact ih _ (learn_bounded hρ hs hr hw)
 
+/-- `train_bounded` from any starting weight in (0, w0], e.g. the weight a sleep left. -/
+theorem train_bounded_from {ρ ηs ηr w0 : ℝ}
+    (hρ : 0 ≤ ρ ∧ ρ ≤ 1) (hs : 0 ≤ ηs ∧ ηs < 1) (hr : 0 ≤ ηr ∧ ηr ≤ 1)
+    (seconds : List (ℕ × Bool)) :
+    ∀ w : ℝ, 0 < w ∧ w ≤ w0 →
+      0 < seconds.foldl (fun w s => learn ρ ηs ηr w0 w s.1 s.2) w ∧
+      seconds.foldl (fun w s => learn ρ ηs ηr w0 w s.1 s.2) w ≤ w0 := by
+  induction seconds with
+  | nil => intro w hw; exact hw
+  | cons s l ih => intro w hw; exact ih _ (learn_bounded hρ hs hr hw)
+
+/-! ## Sleep (`MushroomBody::sleep`, Phase 10)
+
+By day each synapse counts the safe seconds (`safe`) and those in which its Kenyon cell fired
+(`seen`); a day is the list of (spikes, safe?) seconds `learn` saw. At night the weight is
+restored to at least `w0 * exp(-f / RARE)` with `f = seen / max(safe, 1)`: sleep only gives
+weight back (overwriting destroyed what attacks taught, ISSUES O17). -/
+
+/-- Safe seconds in a day (`MushroomBody::safe`). -/
+def safeCount (day : List (ℕ × Bool)) : ℕ := (day.filter fun s => s.2).length
+
+/-- Safe seconds in which the Kenyon cell fired (`MushroomBody::seen`). -/
+def seenCount (day : List (ℕ × Bool)) : ℕ :=
+  ((day.filter fun s => s.2).filter fun s => decide (s.1 ≠ 0)).length
+
+/-- How often the cell fired in safe seconds: `seen / max(safe, 1)`. -/
+noncomputable def freq (day : List (ℕ × Bool)) : ℝ :=
+  (seenCount day : ℝ) / (max (safeCount day) 1 : ℕ)
+
+/-- The weight sleep restores to at least (`MushroomBody::floor`). -/
+noncomputable def floorW (rare w0 : ℝ) (day : List (ℕ × Bool)) : ℝ :=
+  w0 * Real.exp (-freq day / rare)
+
+/-- The weight after sleep (`MushroomBody::sleep`): the day's weight, or the floor if higher. -/
+noncomputable def sleepW (rare w0 w : ℝ) (day : List (ℕ × Bool)) : ℝ :=
+  max w (floorW rare w0 day)
+
+theorem seen_le_safe (day : List (ℕ × Bool)) : seenCount day ≤ safeCount day :=
+  List.length_filter_le _ _
+
+/-- So a frequency is a fraction: f ∈ [0, 1]. -/
+theorem freq_mem (day : List (ℕ × Bool)) : 0 ≤ freq day ∧ freq day ≤ 1 := by
+  unfold freq
+  have hpos : (0 : ℝ) < ((max (safeCount day) 1 : ℕ) : ℝ) := by exact_mod_cast (by omega)
+  refine ⟨div_nonneg (Nat.cast_nonneg _) hpos.le, ?_⟩
+  rw [div_le_one hpos]
+  exact_mod_cast le_trans (seen_le_safe day) (le_max_left _ _)
+
+/-- The floor lies in [w0 * exp(-1 / RARE), w0]. -/
+theorem floor_bounded {rare w0 : ℝ} (hr : 0 < rare) (hw0 : 0 < w0) (day : List (ℕ × Bool)) :
+    w0 * Real.exp (-1 / rare) ≤ floorW rare w0 day ∧ floorW rare w0 day ≤ w0 := by
+  obtain ⟨f0, f1⟩ := freq_mem day
+  unfold floorW
+  constructor
+  · apply mul_le_mul_of_nonneg_left _ hw0.le
+    apply Real.exp_le_exp.mpr
+    exact div_le_div_of_nonneg_right (by linarith) hr.le
+  · have : Real.exp (-freq day / rare) ≤ 1 :=
+      Real.exp_le_one_iff.mpr (div_nonpos_of_nonpos_of_nonneg (by linarith) hr.le)
+    nlinarith
+
+/-- Sleep keeps a weight in (0, w0] and lifts it to at least w0 * exp(-1 / RARE). -/
+theorem sleep_bounded {rare w0 w : ℝ} (hr : 0 < rare) (hw0 : 0 < w0) (hw : 0 < w ∧ w ≤ w0)
+    (day : List (ℕ × Bool)) :
+    w0 * Real.exp (-1 / rare) ≤ sleepW rare w0 w day ∧
+      0 < sleepW rare w0 w day ∧ sleepW rare w0 w day ≤ w0 := by
+  obtain ⟨lo, hi⟩ := floor_bounded hr hw0 day
+  unfold sleepW
+  exact ⟨le_trans lo (le_max_right _ _), lt_of_lt_of_le hw.1 (le_max_left _ _),
+    max_le hw.2 hi⟩
+
+/-- Sleep never takes weight away. -/
+theorem sleep_never_lowers (rare w0 w : ℝ) (day : List (ℕ × Bool)) : w ≤ sleepW rare w0 w day :=
+  le_max_left _ _
+
+/-- What the day taught above the floor stays exactly (the O17 lesson). -/
+theorem sleep_keeps_day_learning {rare w0 w : ℝ} {day : List (ℕ × Bool)}
+    (h : floorW rare w0 day ≤ w) : sleepW rare w0 w day = w :=
+  max_eq_left h
+
+/-- The commoner a pattern was in safe seconds, strictly the lower its floor. -/
+theorem floor_strictAnti {rare w0 : ℝ} (hr : 0 < rare) (hw0 : 0 < w0) {d d' : List (ℕ × Bool)}
+    (h : freq d < freq d') : floorW rare w0 d' < floorW rare w0 d := by
+  unfold floorW
+  apply mul_lt_mul_of_pos_left _ hw0
+  apply Real.exp_lt_exp.mpr
+  exact div_lt_div_of_pos_right (by linarith) hr
+
+/-- So, for the same day weight, the commoner pattern is never restored more. -/
+theorem sleep_antitone {rare w0 w : ℝ} (hr : 0 < rare) (hw0 : 0 < w0) {d d' : List (ℕ × Bool)}
+    (h : freq d ≤ freq d') : sleepW rare w0 w d' ≤ sleepW rare w0 w d := by
+  unfold sleepW
+  rcases h.lt_or_eq with hlt | heq
+  · exact max_le_max le_rfl (floor_strictAnti hr hw0 hlt).le
+  · simp [floorW, heq]
+
+/-- A cell never seen firing in a safe second is restored to its resting weight exactly. -/
+theorem sleep_unseen {rare w0 w : ℝ} {day : List (ℕ × Bool)} (h : seenCount day = 0)
+    (hw : w ≤ w0) : sleepW rare w0 w day = w0 := by
+  simp [sleepW, floorW, freq, h, hw]
+
+/-- A cell active in exactly a RARE fraction of safe seconds has the floor w0 / e. -/
+theorem floor_at_rare {rare w0 : ℝ} (hr : rare ≠ 0) {day : List (ℕ × Bool)} (h : freq day = rare) :
+    floorW rare w0 day = w0 * Real.exp (-1) := by
+  simp [floorW, h, neg_div, div_self hr]
+
+/-- Seconds labelled attack change nothing sleep sees. -/
+theorem attack_seconds_ignored (day : List (ℕ × Bool)) (a : ℕ) :
+    freq (day ++ [(a, false)]) = freq day := by
+  simp [freq, seenCount, safeCount, List.filter_append]
+
+/-- Sleep counts sightings, not spikes: any positive spike count in a second is the same. -/
+theorem spikes_count_once (day : List (ℕ × Bool)) {a b : ℕ} (ha : a ≠ 0) (hb : b ≠ 0)
+    (safe : Bool) :
+    freq (day ++ [(a, safe)]) = freq (day ++ [(b, safe)]) := by
+  cases safe <;> simp [freq, seenCount, safeCount, List.filter_append, ha, hb]
+
+/-- One day and its night: learn through the day's seconds, then sleep on that day's counts. -/
+noncomputable def dayNight (ρ ηs ηr rare w0 w : ℝ) (day : List (ℕ × Bool)) : ℝ :=
+  sleepW rare w0 (day.foldl (fun w s => learn ρ ηs ηr w0 w s.1 s.2) w) day
+
+/-- Any number of days, each followed by a night, keeps every weight in (0, w0]. -/
+theorem days_and_nights_bounded {ρ ηs ηr rare w0 : ℝ}
+    (hρ : 0 ≤ ρ ∧ ρ ≤ 1) (hs : 0 ≤ ηs ∧ ηs < 1) (hr : 0 ≤ ηr ∧ ηr ≤ 1)
+    (hrare : 0 < rare) (hw0 : 0 < w0) (days : List (List (ℕ × Bool))) :
+    ∀ w : ℝ, 0 < w ∧ w ≤ w0 →
+      0 < days.foldl (dayNight ρ ηs ηr rare w0) w ∧
+        days.foldl (dayNight ρ ηs ηr rare w0) w ≤ w0 := by
+  induction days with
+  | nil => intro w hw; exact hw
+  | cons d ds ih =>
+    intro w hw
+    have hday := train_bounded_from hρ hs hr d w hw
+    have hn := sleep_bounded hrare hw0 hday d
+    exact ih _ ⟨hn.2.1, hn.2.2⟩
+
 /-! ## The coordinator (`Coordinator::incident` in `cluster.rs`)
 
 One second of the cluster, abstracted from the spikes: which of the five flies fire now (fly 4

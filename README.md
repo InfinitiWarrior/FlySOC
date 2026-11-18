@@ -68,6 +68,12 @@ data set, are in [Real data](#real-data-lanl).
 - Phase 9, in progress: a probe showed the identity fly reacted to new names, not to how many
   accounts a source fails with; on a big network names are new everywhere. The identity fly now
   smells only the counts ([Phase 9](#phase-9-how-many-not-who)). Still to do: integrating over time.
+- Phase 10, started: sleep is built (`MushroomBody::sleep`, opt-in `FLYSOC_SLEEP=1`): at night each
+  Kenyon cell's output weight is restored to a floor set by how rarely it fired in harmless seconds
+  ([Sleep](#sleep-phase-10-mushroombodysleep-opt-in-flysoc_sleep1)); 13 Rust tests, 14 Lean
+  theorems. Measured on the eval sets it changes nothing that matters (LANL 11 attack episodes
+  against 10, synthetic identical), so it stays off: the identity fly's blind spot is in the
+  encoding, not in over-learned weights (O16, O17). Analyst marks and dreams come next.
 - Phase 6, not started beyond the viewer: the full 3D view.
 - Phase 7, not started: packaging.
 
@@ -116,8 +122,18 @@ cargo run --release -- bench   # 1 s of whole-brain fly time, headless
 cargo run --release -- detect --train data/telemetry/train.jsonl data/telemetry/baseline.jsonl data/telemetry/holdout.jsonl
 cargo run --release -- cluster data/telemetry/cluster_train.jsonl data/telemetry/cluster_holdout.jsonl
 cargo run --release -- watch data/telemetry/cluster_train.jsonl data/telemetry/cluster_holdout.jsonl
-cargo test --release
+cargo test --release            # 25 tests, below
 ```
+
+`cargo test` checks the encoding (stable odours, history counts, shards split every event to
+exactly one fly, a history-only fly smells counts and never names), learning (safe windows depress,
+attacks restore) and sleep (max of the day and the floor, never lowering a weight over random
+days, keeping what attacks taught, the floor falling with frequency, attack windows and spike
+counts not counted as harmless sightings, flies counting independently), the sharded readout (one threshold for busy
+and quiet shards, bursts standing out) and one GPU spike test (skipped without `data/fly.bin`).
+The sleep and readout tests were checked against planted bugs (overwriting instead of restoring,
+min for max, wrong scaling, counting attack seconds or spikes, no reset, dividing by a constant):
+each fails at least one test.
 
 `detect [--train <labelled>] <baseline> <events>` takes JSON-lines telemetry. It optionally learns
 from labelled telemetry first, calibrates on benign traffic, then prints one JSON alert per anomalous
@@ -331,6 +347,23 @@ convex combination toward $w^0_j$ or a shrink toward $0$, so $0 < w_j \le w^0_j$
 can only teach what is safe (E10 tried letting attack seconds push $w$ above $w^0$; it did not
 help).
 
+### Sleep (Phase 10, `MushroomBody::sleep`, opt-in `FLYSOC_SLEEP=1`)
+
+By day each synapse counts the safe seconds $S_j$ and those in which its Kenyon cell fired,
+$A_j = \lvert\{t : \text{safe}_t,\ \alpha_{j,t} > 0\}\rvert$. At night every weight is restored
+to at least a floor set by that frequency, and the counts start again:
+
+```math
+f_j = \frac{A_j}{\max(S_j,\,1)} \in [0, 1], \qquad
+w_j \leftarrow \max\bigl(w_j,\ w^0_j\, e^{-f_j / r}\bigr), \qquad r = 0.005
+```
+
+Sleep never lowers a weight, and what the day taught above the floor stays exactly. A cell never
+seen is restored to $w^0_j$, one active in a fraction $r$ of safe seconds to at least $w^0_j / e$,
+and the commoner the pattern, strictly the lower its floor. $r$ is the thresholds' calm quantile:
+once in 200 seconds. (A first version replaced $w_j$ by the floor outright; that threw away what
+attack seconds taught, ISSUES O17.)
+
 ### Alarms (`cluster.rs`)
 
 A fly's evidence is an exponential average of its MBON spikes $m_t$ per second, and it fires
@@ -389,14 +422,21 @@ Everything below is checked by Lean 4.35.0 with Mathlib (`proofs/FlySOC.lean`, n
 |---|---|
 | `bucket_mono`, `long_bucket_ge_short` | more distinct values never mean a lower bucket, so $b(n_{60}) \le b(n_{900})$ |
 | `code_eq_Ico`, `code_disjoint`, `code_overlap` | below the cap a code is 4 consecutive glomeruli, and $\lvert G(b) \cap G(b')\rvert = \max(0,\, 4 - \lvert b - b'\rvert)$ |
-| `learn_bounded`, `train_bounded` | every learning step, and so every training run of any length, keeps $0 < w_j \le w^0_j$ |
+| `learn_bounded`, `train_bounded`, `train_bounded_from` | every learning step, and so every training run of any length from any start in $(0, w^0_j]$, keeps $0 < w_j \le w^0_j$ |
+| `seen_le_safe`, `freq_mem` | sleep's frequency is a fraction: $A_j \le S_j$, so $f_j \in [0, 1]$ |
+| `floor_bounded`, `sleep_bounded` | the floor lies in $[w^0_j e^{-1/r}, w^0_j]$; after sleep $w^0_j e^{-1/r} \le w_j \le w^0_j$ |
+| `sleep_never_lowers`, `sleep_keeps_day_learning` | sleep only gives weight back; above the floor the day's weight stays exactly (O17) |
+| `floor_strictAnti`, `sleep_antitone`, `sleep_unseen`, `floor_at_rare` | commoner means a strictly lower floor and never more weight back; never seen restores $w^0_j$; $f_j = r$ gives the floor $w^0_j / e$ |
+| `attack_seconds_ignored`, `spikes_count_once` | attack seconds change nothing sleep sees; 1 spike or 50 in a second are one sighting |
+| `days_and_nights_bounded` | any number of days of learning, each followed by a night's sleep, keeps $0 < w_j \le w^0_j$ |
 | `incident_is_alert` | every incident (rule D) is also a rule E alert: leads only ever add |
 | `alert_corroborated` | no fly can raise an incident or a lead alone: two different flies named the entity |
 | `teamOrSingle_uncorroborated` | rule B lacks that property (a counterexample) |
 | `lead_has_strong_specialist` | a lead that is not an incident has a specialist at $\kappa = 1.5$ times its threshold |
 
-What the proofs do **not** cover: the weights are real numbers, while `MushroomBody::learn` runs
-in `f32` (rounding is not modelled); the coordinator is modelled one second at a time, from which
+What the proofs do **not** cover: the weights are real numbers, while `MushroomBody::learn` and
+`sleep` run in `f32` (rounding is not modelled; a weight depressed by thousands of safe spikes can
+underflow to exactly 0 in `f32` where Lean proves $w_j > 0$, so the Rust tests check $w_j \ge 0$); the coordinator is modelled one second at a time, from which
 flies fire and whom they name, not from the spiking network that decides that; and nothing yet is
 proved about a *trained* circuit's behaviour on particular inputs.
 
@@ -405,6 +445,11 @@ cd proofs && lake exe cache get && lake build   # ~7 GB of Mathlib build cache i
 ```
 
 ```lean
+/-
+FlySOC, Phase 5: machine-checked properties of the encoding and the learning rule.
+Each definition mirrors a line of the Rust code, named in its docstring. `lake build` checks all
+of it; there is no `sorry` in this file.
+-/
 import Mathlib
 
 namespace FlySOC
@@ -496,6 +541,142 @@ theorem train_bounded {ρ ηs ηr w0 : ℝ}
   induction l with
   | nil => intro w hw; exact hw
   | cons s l ih => intro w hw; exact ih _ (learn_bounded hρ hs hr hw)
+
+/-- `train_bounded` from any starting weight in (0, w0], e.g. the weight a sleep left. -/
+theorem train_bounded_from {ρ ηs ηr w0 : ℝ}
+    (hρ : 0 ≤ ρ ∧ ρ ≤ 1) (hs : 0 ≤ ηs ∧ ηs < 1) (hr : 0 ≤ ηr ∧ ηr ≤ 1)
+    (seconds : List (ℕ × Bool)) :
+    ∀ w : ℝ, 0 < w ∧ w ≤ w0 →
+      0 < seconds.foldl (fun w s => learn ρ ηs ηr w0 w s.1 s.2) w ∧
+      seconds.foldl (fun w s => learn ρ ηs ηr w0 w s.1 s.2) w ≤ w0 := by
+  induction seconds with
+  | nil => intro w hw; exact hw
+  | cons s l ih => intro w hw; exact ih _ (learn_bounded hρ hs hr hw)
+
+/-! ## Sleep (`MushroomBody::sleep`, Phase 10)
+
+By day each synapse counts the safe seconds (`safe`) and those in which its Kenyon cell fired
+(`seen`); a day is the list of (spikes, safe?) seconds `learn` saw. At night the weight is
+restored to at least `w0 * exp(-f / RARE)` with `f = seen / max(safe, 1)`: sleep only gives
+weight back (overwriting destroyed what attacks taught, ISSUES O17). -/
+
+/-- Safe seconds in a day (`MushroomBody::safe`). -/
+def safeCount (day : List (ℕ × Bool)) : ℕ := (day.filter fun s => s.2).length
+
+/-- Safe seconds in which the Kenyon cell fired (`MushroomBody::seen`). -/
+def seenCount (day : List (ℕ × Bool)) : ℕ :=
+  ((day.filter fun s => s.2).filter fun s => decide (s.1 ≠ 0)).length
+
+/-- How often the cell fired in safe seconds: `seen / max(safe, 1)`. -/
+noncomputable def freq (day : List (ℕ × Bool)) : ℝ :=
+  (seenCount day : ℝ) / (max (safeCount day) 1 : ℕ)
+
+/-- The weight sleep restores to at least (`MushroomBody::floor`). -/
+noncomputable def floorW (rare w0 : ℝ) (day : List (ℕ × Bool)) : ℝ :=
+  w0 * Real.exp (-freq day / rare)
+
+/-- The weight after sleep (`MushroomBody::sleep`): the day's weight, or the floor if higher. -/
+noncomputable def sleepW (rare w0 w : ℝ) (day : List (ℕ × Bool)) : ℝ :=
+  max w (floorW rare w0 day)
+
+theorem seen_le_safe (day : List (ℕ × Bool)) : seenCount day ≤ safeCount day :=
+  List.length_filter_le _ _
+
+/-- So a frequency is a fraction: f ∈ [0, 1]. -/
+theorem freq_mem (day : List (ℕ × Bool)) : 0 ≤ freq day ∧ freq day ≤ 1 := by
+  unfold freq
+  have hpos : (0 : ℝ) < ((max (safeCount day) 1 : ℕ) : ℝ) := by exact_mod_cast (by omega)
+  refine ⟨div_nonneg (Nat.cast_nonneg _) hpos.le, ?_⟩
+  rw [div_le_one hpos]
+  exact_mod_cast le_trans (seen_le_safe day) (le_max_left _ _)
+
+/-- The floor lies in [w0 * exp(-1 / RARE), w0]. -/
+theorem floor_bounded {rare w0 : ℝ} (hr : 0 < rare) (hw0 : 0 < w0) (day : List (ℕ × Bool)) :
+    w0 * Real.exp (-1 / rare) ≤ floorW rare w0 day ∧ floorW rare w0 day ≤ w0 := by
+  obtain ⟨f0, f1⟩ := freq_mem day
+  unfold floorW
+  constructor
+  · apply mul_le_mul_of_nonneg_left _ hw0.le
+    apply Real.exp_le_exp.mpr
+    exact div_le_div_of_nonneg_right (by linarith) hr.le
+  · have : Real.exp (-freq day / rare) ≤ 1 :=
+      Real.exp_le_one_iff.mpr (div_nonpos_of_nonpos_of_nonneg (by linarith) hr.le)
+    nlinarith
+
+/-- Sleep keeps a weight in (0, w0] and lifts it to at least w0 * exp(-1 / RARE). -/
+theorem sleep_bounded {rare w0 w : ℝ} (hr : 0 < rare) (hw0 : 0 < w0) (hw : 0 < w ∧ w ≤ w0)
+    (day : List (ℕ × Bool)) :
+    w0 * Real.exp (-1 / rare) ≤ sleepW rare w0 w day ∧
+      0 < sleepW rare w0 w day ∧ sleepW rare w0 w day ≤ w0 := by
+  obtain ⟨lo, hi⟩ := floor_bounded hr hw0 day
+  unfold sleepW
+  exact ⟨le_trans lo (le_max_right _ _), lt_of_lt_of_le hw.1 (le_max_left _ _),
+    max_le hw.2 hi⟩
+
+/-- Sleep never takes weight away. -/
+theorem sleep_never_lowers (rare w0 w : ℝ) (day : List (ℕ × Bool)) : w ≤ sleepW rare w0 w day :=
+  le_max_left _ _
+
+/-- What the day taught above the floor stays exactly (the O17 lesson). -/
+theorem sleep_keeps_day_learning {rare w0 w : ℝ} {day : List (ℕ × Bool)}
+    (h : floorW rare w0 day ≤ w) : sleepW rare w0 w day = w :=
+  max_eq_left h
+
+/-- The commoner a pattern was in safe seconds, strictly the lower its floor. -/
+theorem floor_strictAnti {rare w0 : ℝ} (hr : 0 < rare) (hw0 : 0 < w0) {d d' : List (ℕ × Bool)}
+    (h : freq d < freq d') : floorW rare w0 d' < floorW rare w0 d := by
+  unfold floorW
+  apply mul_lt_mul_of_pos_left _ hw0
+  apply Real.exp_lt_exp.mpr
+  exact div_lt_div_of_pos_right (by linarith) hr
+
+/-- So, for the same day weight, the commoner pattern is never restored more. -/
+theorem sleep_antitone {rare w0 w : ℝ} (hr : 0 < rare) (hw0 : 0 < w0) {d d' : List (ℕ × Bool)}
+    (h : freq d ≤ freq d') : sleepW rare w0 w d' ≤ sleepW rare w0 w d := by
+  unfold sleepW
+  rcases h.lt_or_eq with hlt | heq
+  · exact max_le_max le_rfl (floor_strictAnti hr hw0 hlt).le
+  · simp [floorW, heq]
+
+/-- A cell never seen firing in a safe second is restored to its resting weight exactly. -/
+theorem sleep_unseen {rare w0 w : ℝ} {day : List (ℕ × Bool)} (h : seenCount day = 0)
+    (hw : w ≤ w0) : sleepW rare w0 w day = w0 := by
+  simp [sleepW, floorW, freq, h, hw]
+
+/-- A cell active in exactly a RARE fraction of safe seconds has the floor w0 / e. -/
+theorem floor_at_rare {rare w0 : ℝ} (hr : rare ≠ 0) {day : List (ℕ × Bool)} (h : freq day = rare) :
+    floorW rare w0 day = w0 * Real.exp (-1) := by
+  simp [floorW, h, neg_div, div_self hr]
+
+/-- Seconds labelled attack change nothing sleep sees. -/
+theorem attack_seconds_ignored (day : List (ℕ × Bool)) (a : ℕ) :
+    freq (day ++ [(a, false)]) = freq day := by
+  simp [freq, seenCount, safeCount, List.filter_append]
+
+/-- Sleep counts sightings, not spikes: any positive spike count in a second is the same. -/
+theorem spikes_count_once (day : List (ℕ × Bool)) {a b : ℕ} (ha : a ≠ 0) (hb : b ≠ 0)
+    (safe : Bool) :
+    freq (day ++ [(a, safe)]) = freq (day ++ [(b, safe)]) := by
+  cases safe <;> simp [freq, seenCount, safeCount, List.filter_append, ha, hb]
+
+/-- One day and its night: learn through the day's seconds, then sleep on that day's counts. -/
+noncomputable def dayNight (ρ ηs ηr rare w0 w : ℝ) (day : List (ℕ × Bool)) : ℝ :=
+  sleepW rare w0 (day.foldl (fun w s => learn ρ ηs ηr w0 w s.1 s.2) w) day
+
+/-- Any number of days, each followed by a night, keeps every weight in (0, w0]. -/
+theorem days_and_nights_bounded {ρ ηs ηr rare w0 : ℝ}
+    (hρ : 0 ≤ ρ ∧ ρ ≤ 1) (hs : 0 ≤ ηs ∧ ηs < 1) (hr : 0 ≤ ηr ∧ ηr ≤ 1)
+    (hrare : 0 < rare) (hw0 : 0 < w0) (days : List (List (ℕ × Bool))) :
+    ∀ w : ℝ, 0 < w ∧ w ≤ w0 →
+      0 < days.foldl (dayNight ρ ηs ηr rare w0) w ∧
+        days.foldl (dayNight ρ ηs ηr rare w0) w ≤ w0 := by
+  induction days with
+  | nil => intro w hw; exact hw
+  | cons d ds ih =>
+    intro w hw
+    have hday := train_bounded_from hρ hs hr d w hw
+    have hn := sleep_bounded hrare hw0 hday d
+    exact ih _ ⟨hn.2.1, hn.2.2⟩
 
 /-! ## The coordinator (`Coordinator::incident` in `cluster.rs`)
 
@@ -1042,8 +1223,10 @@ Why we expect this to suit the fly better than it suits an LLM: an LLM's knowled
 every weight, so continual learning needs extra machinery (new experts, distillation) to avoid
 overwriting it. The mushroom body's sparse expansion with local, dopamine-gated learning resists
 forgetting by construction (Shen, Dasgupta and Navlakha 2023); sleep then only has to fix what
-the fly gets wrong, how often each pattern is harmless. That is an expectation, not a result:
-Phase 10's done-when compares the same LANL days with and without sleep. The fly cannot reason or
+the fly gets wrong, how often each pattern is harmless. That was an expectation; the first
+measurements (O17) say sleep's consolidation is safe but does not, on its own, fix O16: the fly's
+blind spot is in how counts are encoded, not in over-learned weights. Dreams and analyst marks are
+still to be measured. The fly cannot reason or
 generalise like an LLM; the claim is only about learning what is normal on one network over time.
 
 ## Memory

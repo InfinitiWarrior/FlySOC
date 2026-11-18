@@ -279,6 +279,43 @@ extreme training seconds push the threshold above 300. LANL eval: 2 attack / 2 f
 weighs how often each pattern was harmless can (Phase 10's sleep phase, README "Phase 10 design").
 **Next**: integrating over time (Phase 9), then sleep (Phase 10).
 
+### O17. Sleep that overwrites the day's weights destroys what attacks taught (P10, fixed; no gain yet)
+**Symptom**: `MushroomBody::sleep` as first built set every output weight to
+$w^0 e^{-f/r}$ from its safe-second frequency $f$, replacing the day's weight. Eval sets
+(`data/runs/p10/z*`):
+
+| | LANL eval, identity episodes attack / false | synthetic eval, rule D | synthetic network fly |
+|---|---|---|---|
+| no sleep (default) | 10 / 0 | +87 s, 23/50, 0 false s | 10/10, +34 s |
+| sleep, r = 0.005 | 10 / 0 | +624 s, 12/50, 0 | 6/10, +324 s |
+| sleep, r = 0.02 | 12 / 1 | +633 s, 10/50, 0 | 10/10, +53 s |
+
+The probe (README "Phase 9") still showed no readout response rising with the failed-users count.
+**Cause**: sleep ignored attack seconds and threw away the day's weights, including what attack
+seconds restored. Kenyon cells are shared between odours: a cell that signals a scan also fires in
+ordinary traffic, so its frequency is high and sleep silenced it. The Lean theorem
+`night_forgets_the_weight` states the overwrite exactly; it holds, and it is the flaw.
+**Fix**: sleep only gives weight back, $w \leftarrow \max(w, w^0 e^{-f/r})$ (`MushroomBody::sleep`,
+`floor`): what attacks and common patterns taught by day stays, a pattern met harmlessly once or
+twice is restored. Lean: `sleep_never_lowers`, `sleep_keeps_day_learning`,
+`days_and_nights_bounded` replace the overwrite theorem; the Rust tests fail on the overwrite
+version (4 tests) and on min for max (9).
+
+| restore-only sleep | LANL eval, identity attack / false | synthetic eval, rule D | rule E | network fly |
+|---|---|---|---|---|
+| r = 0.005 | 11 / 0 | +87 s, 23/50, 0 false s | +74 s, 34/50, 5 | 10/10, +34 s |
+| r = 0.02 | 10 / 1 | +88 s, 23/50, 0 | +78 s, 34/50, 5 | 10/10, +34 s |
+
+Safe: synthetic results are the default's to the second. But it changes nothing that matters, and
+the probe is still flat (readout added per logon at counts 1..16: 0, 0, 1, 1, 0, 16, 5, 0, ...,
+7; count 6 responds in every variant, so that is the background, not the count). Sleep stays
+opt-in (`FLYSOC_SLEEP=1`), off by default.
+**Lesson**: the hypothesis behind it, that one harmless sighting over-depresses a rare count's
+synapses, is mostly wrong. With one failure a minute the 60-second code always reads 1, and
+neighbouring 15-minute buckets share 3 of 4 glomeruli (ordinal code, O7), so a count of 16 lights
+nearly the same Kenyon cells as a count of 2. No learning rule can separate cells the encoding has
+merged: the next step is the encoding (Phase 9).
+
 ## Solved: simulation and GPU
 
 ### S1. Pull-based simulation was too slow (P0)
