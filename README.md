@@ -44,8 +44,8 @@ data set, are in [Real data](#real-data-lanl).
   everything, and a coordinator that links alarms by host or user. On 10 held-out intrusions, the
   default rule (the team confirms the single fly) catches 10/10 at a median +89 s: 8 during the
   scan, within 2 minutes, 2 only at exfiltration, about 10 minutes in. Scored as an analyst's
-  queue, 84% of its 45 alerts are about an intrusion; the rest are the authorised scanner (1) and
-  alerts about nothing labelled (6) (see [Phase 3](#phase-3-cluster)).
+  queue, 87% of its 45 alerts are about an intrusion; the rest are the authorised scanner (1) and
+  alerts about nothing labelled (5) (see [Phase 3](#phase-3-cluster)).
 - Phase 4, in progress: red vs blue evolution (`tools/red.py`). Red found a real evasion, a
   low-and-slow scan. Blue answered twice: 15-minute history counts (E10), and leads, a second alert
   tier for a specialist that is sure of itself (O12). With leads, all 10 held-out intrusions raise
@@ -56,14 +56,20 @@ data set, are in [Real data](#real-data-lanl).
   raise an incident or a lead ([Lean 4](#lean-4-what-is-proved-phase-5)). About every trained
   fly: training can only quiet an odour through Kenyon cells that harmless traffic also lit, so an
   odour made of cells it never lit drives the trained fly exactly as hard as the untrained one.
-  Still open: the spiking network between those Kenyon cells and the alarm.
+  Measured (`flysoc cover`), that guarantee covers almost nothing: a day of harmless traffic lights
+  nearly every Kenyon cell at least once (O19). The same measurement shows O16 in one number: on
+  LANL the trained identity fly passes on 1.9% of an attack second's untrained drive and 1.3% of
+  a harmless one's, against 29% and 5.5% on synthetic data. Still open: the spiking network between
+  the Kenyon cells and the alarm.
 
 - Real data: the flies run on the LANL enterprise data (17,684 computers), a 4-hour slice in about
   2 minutes. Since Phase 9's first step the identity fly smells how many accounts a source fails
-  with, not their names, and since Phase 11 a fly without fan-out behind its suspects does not
-  vote: on the final slices (days 12-14) the flies raise 82 false alarm episodes in 12 hours
-  instead of 184, and 4 of the identity fly's 10 are about the red team (before: 6 of 41). A plain
-  count of the same input still finds more (O16).
+  with, not their names; since Phase 11 a fly without fan-out behind its suspects does not vote;
+  and since O20 the identity fly tells 5 failed accounts from 2 (a fine count scale). On the final
+  slices (days 12-14) 19 of the identity fly's 26 alarm episodes are about the red team (73%,
+  the same precision as a plain count of its input, which finds 33 of 45); before O20 4 of 10,
+  before Phase 9 6 of 41. The other flies cannot see this red team and raise 77 false episodes
+  in 12 hours (O16, O20).
 - Phase 8, done: baselines on the same final data, scored the same way. On synthetic data the flies
   win: the single fly names all 10 intrusions with no false episode (+78 s), the network fly 9 of
   10 at +36 s; the best baseline needs +240 s. On LANL a plain count of the identity fly's own input
@@ -71,7 +77,9 @@ data set, are in [Real data](#real-data-lanl).
   the fly level with it. See [Baselines](#baselines-phase-8).
 - Phase 9, in progress: a probe showed the identity fly reacted to new names, not to how many
   accounts a source fails with; on a big network names are new everywhere. The identity fly now
-  smells only the counts ([Phase 9](#phase-9-how-many-not-who)). Still to do: integrating over time.
+  smells only the counts ([Phase 9](#phase-9-how-many-not-who)), on a fine scale where every count
+  up to 12 has its own glomeruli (O20): LANL final attack episodes 4 to 19, synthetic final false
+  alert seconds 94 to 8. Still to do: integrating over time.
 - Phase 10, started: sleep is built (`MushroomBody::sleep`, opt-in `FLYSOC_SLEEP=1`): at night each
   Kenyon cell's output weight is restored to a floor set by how rarely it fired in harmless seconds
   ([Sleep](#sleep-phase-10-mushroombodysleep-opt-in-flysoc_sleep1)); 13 Rust tests, 14 Lean
@@ -84,7 +92,7 @@ data set, are in [Real data](#real-data-lanl).
   alarm on LANL had no fan-out behind it; a fly now votes only with fan-out (O18): rule D's queue
   on the synthetic final set rose from 75% to 84% precision, detection unchanged. The sentences are
   FlySOC's bookkeeping, not the fly's words; counterfactual replays ask the fly whether they name
-  the cause (identity fly: 25 of 27 confirmed on synthetic final). The neural path (which neurons
+  the cause (identity fly: 25 of 27 confirmed on synthetic final, measured before O20). The neural path (which neurons
   carried an alarm) is left for Phase 6's view.
 - Phase 6, not started beyond the viewer: the full 3D view.
 - Phase 7, not started: packaging.
@@ -134,7 +142,8 @@ cargo run --release -- bench   # 1 s of whole-brain fly time, headless
 cargo run --release -- detect --train data/telemetry/train.jsonl data/telemetry/baseline.jsonl data/telemetry/holdout.jsonl
 cargo run --release -- cluster data/telemetry/cluster_train.jsonl data/telemetry/cluster_holdout.jsonl
 cargo run --release -- watch data/telemetry/cluster_train.jsonl data/telemetry/cluster_holdout.jsonl
-cargo test --release            # 34 tests, below
+cargo run --release -- cover data/telemetry/cluster_train.jsonl data/telemetry/cluster_holdout.jsonl > cover.tsv
+cargo test --release            # 35 tests, below
 ```
 
 `cargo test` checks the encoding (stable odours, history counts, the overlapping count code pinned
@@ -439,6 +448,7 @@ Everything below is checked by Lean 4.35.0 with Mathlib (`proofs/FlySOC.lean`, n
 |---|---|
 | `bucket_mono`, `long_bucket_ge_short` | more distinct values never mean a lower bucket, so $b(n_{60}) \le b(n_{900})$ |
 | `code_eq_Ico`, `code_disjoint`, `code_overlap` | below the cap a code is 4 consecutive glomeruli, and $\lvert G(b) \cap G(b')\rvert = \max(0,\, 4 - \lvert b - b'\rvert)$ |
+| `fineBucket_mono`, `fine_separates_small` | the fine scale of history-only flies (O20) never ranks more distinct values lower; 5 failed users sit 3 buckets from 2 (sharing 1 glomerulus), against 1 bucket (sharing 3) on the power-of-two scale |
 | `learn_bounded`, `train_bounded`, `train_bounded_from` | every learning step, and so every training run of any length from any start in $(0, w^0_j]$, keeps $0 < w_j \le w^0_j$ |
 | `seen_le_safe`, `freq_mem` | sleep's frequency is a fraction: $A_j \le S_j$, so $f_j \in [0, 1]$ |
 | `floor_bounded`, `sleep_bounded` | the floor lies in $[w^0_j e^{-1/r}, w^0_j]$; after sleep $w^0_j e^{-1/r} \le w_j \le w^0_j$ |
@@ -459,10 +469,37 @@ What the proofs do **not** cover: the weights are real numbers, while `MushroomB
 underflow to exactly 0 in `f32` where Lean proves $w_j > 0$, so the Rust tests check $w_j \ge 0$); the coordinator is modelled one second at a time, from which
 flies fire and whom they name, not from the spiking network that decides that; and nothing yet is
 proved about the spiking network between the Kenyon cells and the alarm: the trained-fly theorems
-bound the MBON's synaptic drive, not its spikes, and how many of an attack's Kenyon cells harmless
-traffic lit (which decides how much the guarantee covers) is not measured yet. The Rust test
+bound the MBON's synaptic drive, not its spikes. How much they cover is measured below and is
+almost nothing (O19). The Rust test
 `a_cell_harmless_traffic_never_lit_keeps_its_weight_exactly` checks `unseen_stays` holds bit for
 bit in `f32`.
+
+#### How much the trained-fly guarantee covers (`flysoc cover`)
+
+`flysoc cover <train> <events>` trains afresh, then prints for every second and fly the MBON's
+trained drive $\sum_j w_j x_j$, its untrained drive $\sum_j w^0_j x_j$, and the part of that
+through Kenyon cells harmless training never lit, which `drive_loss_le_overlap` says training
+cannot take (`MushroomBody::cover`). Medians over the final sets (LANL `final_1`-`3`, synthetic
+`cluster_final_31`-`35`; the eval sets agree to within a few points):
+
+| data | fly | seconds | unlit share of the untrained drive | seconds with any unlit drive | trained / untrained drive |
+|---|---|---|---|---|---|
+| LANL | identity, attack | 174 | 0 | 1% | 0.019 |
+| LANL | identity, harmless | 43,026 | 0 | 0% | 0.013 |
+| LANL | single fly, attack | 174 | 0 | 0% | 0.003 |
+| LANL | single fly, harmless | 43,026 | 0 | 0% | 0.003 |
+| synthetic | identity, attack | 180 | 0 | 8% | 0.287 |
+| synthetic | identity, harmless | 6,921 | 0 | 2% | 0.055 |
+| synthetic | dns, attack | 1,200 | 0.002 | 89% | 0.038 |
+| synthetic | single fly, attack | 1,860 | 0.001 | 55% | 0.009 |
+| synthetic | single fly, harmless | 10,140 | 0 | 1% | 0.006 |
+
+No second broke the theorem (trained drive below the unlit part) in 409,000 measured. But the
+guarantee is nearly empty: over a training day every Kenyon cell fires in some harmless second, so
+"never lit" almost never applies. What separates attacks is how much the weights were depressed,
+not whether: the last column. On synthetic data the identity fly passes on 5 times more of an
+attack's drive than of a harmless second's; on LANL 1.4 times, which is why it hardly tells the red
+team from the background (O16, O19).
 
 ```sh
 cd proofs && lake exe cache get && lake build   # ~7 GB of Mathlib build cache in proofs/.lake
@@ -478,7 +515,7 @@ import Mathlib
 
 namespace FlySOC
 
-/-- Power-of-two bucket of a count: `usize::BITS - n.leading_zeros()` in `History::observe`. -/
+/-- Power-of-two bucket of a count: `log_bucket` in `detect.rs` (`u64::BITS - n.leading_zeros()`). -/
 def bucket (n : ℕ) : ℕ := if n = 0 then 0 else Nat.log2 n + 1
 
 /-- Reserved glomeruli lit by bucket `b` in an ordinal code of `size` glomeruli at offset `o`:
@@ -500,6 +537,26 @@ theorem bucket_mono {m n : ℕ} (h : m ≤ n) : bucket m ≤ bucket n := by
 short bucket (`History::distinct` returns both). -/
 theorem long_bucket_ge_short {short long : ℕ} (h : short ≤ long) : bucket short ≤ bucket long :=
   bucket_mono h
+
+/-- The fine scale of a history-only fly (`fine_bucket`, ISSUES O20): every count up to 12 its own
+bucket, then powers of two. -/
+def fineBucket (n : ℕ) : ℕ := if n ≤ 12 then n else 12 + 1 + bucket n - bucket 12
+
+/-- The fine scale never ranks more distinct values lower either. -/
+theorem fineBucket_mono {m n : ℕ} (h : m ≤ n) : fineBucket m ≤ fineBucket n := by
+  have hb : bucket 12 = 4 := by decide
+  have h13 : ∀ k, 13 ≤ k → 4 ≤ bucket k := fun k hk => hb ▸ bucket_mono (by omega)
+  unfold fineBucket
+  split_ifs with hm hn
+  · exact h
+  · have := h13 n (by omega); omega
+  · omega
+  · have := bucket_mono h; omega
+
+/-- Below 13 the fine scale is the count itself, so 5 failed users and 2 sit 3 buckets apart and,
+by `code_overlap`, share one glomerulus; on the power-of-two scale they are neighbours sharing 3. -/
+theorem fine_separates_small : fineBucket 5 - fineBucket 2 = 3 ∧ bucket 5 - bucket 2 = 1 := by
+  decide
 
 /-- Away from the cap, buckets four or more apart light disjoint glomeruli. -/
 theorem code_disjoint {o size b b' : ℕ} (hcap : b' + 3 < size) (h : b + 4 ≤ b') :
@@ -931,15 +988,15 @@ Look-alikes are benign activity, so alerting on one is a false positive: lower i
 | final set | intrusions caught ↑ | median first alert ↓ | look-alikes alerted ↓ | false alert seconds ↓ |
 |---|---|---|---|---|
 | network fly | 10/10 | +34 s | 23/50 | 253/2549 |
-| identity fly | 10/10 | +258 s | 17/50 | 94/2549 |
+| identity fly | 10/10 | +248 s | 15/50 | 8/2549 |
 | endpoint fly | 6/10 | +248 s | **11/50** | 28/2549 |
 | DNS fly | 10/10 | +610 s | 14/50 | **0/2549** |
 | single fly | 10/10 | +78 s | 21/50 | 2/2549 |
-| A team | 10/10 | +246 s | 22/50 | 38/2549 |
-| B team or single | 10/10 | **+41 s** | 28/50 | 40/2549 |
-| C all vote | 10/10 | +60 s | 31/50 | 81/2549 |
+| A team | 10/10 | +248 s | 24/50 | 2/2549 |
+| B team or single | 10/10 | **+58 s** | 30/50 | 4/2549 |
+| C all vote | 10/10 | +75 s | 33/50 | 12/2549 |
 | **D confirmed** (incidents) | **10/10** | +89 s | **20/50** | 2/2549 |
-| **E D or strong pair** (incidents + leads) | **10/10** | +75 s | 26/50 | 45/2549 |
+| **E D or strong pair** (incidents + leads) | **10/10** | +75 s | 26/50 | 2/2549 |
 
 The medians hide that first alerts come in two groups. Each intrusion is caught either during the
 scan (+47 to +114 s for D here) or only when exfiltration starts (about +625 s). Rule D catches 8 of
@@ -952,14 +1009,16 @@ only, D caught 5 early here, and its median was +360 s.
 with thresholds from the training file alone, which L8 showed were set too low by luck; D +360 s,
 19/50, 0 before the 15-minute counts of E10. Since Phase 9 the identity fly smells only counts: D
 is unchanged on this set; before it, the identity fly had 0 false seconds, E alerted at +60 s on
-24/50 and 2 seconds, A +191 s, B and C +53 s. All changes were chosen on the eval set, on LANL's
+24/50 and 2 seconds, A +191 s, B and C +53 s. Since O20's fine count scale the identity fly
+raises 8 false seconds instead of 94 and rules A, B, C and E 2-12 instead of 38-81; before it
+B alerted at +41 s, C at +60 s. All changes were chosen on the eval set, on LANL's
 eval slices or against red.)
 
 **Verdict.** Every rule catches all 10 intrusions. D alerts at a median +89 s, on 20 look-alikes and
 2 seconds of plain traffic. The single fly alone is a little faster (+78 s) with about the same
 false alarms (21/50, 2 s): the team's confirmation still does not clearly pay (O1). B and C are the
-fastest rules but alert on 28-31 look-alikes and 40-81 plain seconds. Leads (E) catch 9 of 10
-intrusions within 2 minutes for 6 more look-alike alerts and 43 more plain seconds (11 more
+fastest rules but alert on 30-33 look-alikes and 4-12 plain seconds. Leads (E) catch 9 of 10
+intrusions within 2 minutes for 6 more look-alike alerts and no more plain seconds (12 more
 look-alikes on the eval set), which is why they are a separate, lower tier rather than incidents. The network fly alone sees every scan within a minute,
 but alarms for 253 seconds. With 50 look-alikes, differences of a few alerts are within noise.
 
@@ -971,10 +1030,11 @@ queue entry, attributed to an intrusion if the entity takes part in one at that 
 
 | alert queue | eval set | final set | final: first alert naming an intrusion host |
 |---|---|---|---|
-| D, incidents | 43 alerts, 93% about an intrusion | 45 alerts, **84%** (1 scanner, 6 about nothing) | +102 s |
-| E, incidents + leads | 65 alerts, 91% | 66 alerts, 82% (1 scanner, 11 about nothing) | +96 s |
+| D, incidents | 43 alerts, 93% about an intrusion | 45 alerts, **87%** (1 scanner, 5 about nothing) | +102 s |
+| E, incidents + leads | 65 alerts, 91% | 66 alerts, 85% (1 scanner, 9 about nothing) | +96 s |
 
-Holdout: every alert (6 for D, 8 for E) is about one of its 2 intrusions. Since Phase 11 a fly
+Holdout: every alert (6 for D, 8 for E) is about one of its 2 intrusions. Before O20 the final
+queues were 84% and 82%. Since Phase 11 a fly
 votes only with fan-out behind its suspects (O18); before that the final set had 48 alerts at 75%
 (+96 s) and 72 at 75% (+89 s), eval 66 at 89% for E. (Before Phase 9: eval 44 and 55 alerts, 91%;
 final 43 at 79%, +102 s, and 55 at 76%, +90 s; holdout 5 and 6.) Neither more training
@@ -1016,27 +1076,28 @@ voter per role, so the coordinator still sees five roles. Extra flies are cheap,
 bound by dispatches, not neurons. 50 flies play 2417 s in 58 s in `watch` (one row per role, one
 column per individual). 50 flies use 528 MiB of GPU memory and 1.1 GiB of RAM at peak (5 flies:
 about 210 MiB and 575 MiB), and play a 2400 s file in 60 s (5 flies: 16 s), after training once
-in 82 s and calibrating in 307 s. Eval set (cluster_eval_21-25), rule D, measured before the calibration
-file of L8 (thresholds from the training file alone):
+in 82 s and calibrating in 307 s. Eval set (cluster_eval_21-25), rule D, measured again with the
+current flies (calibration file of L8, history-only identity fly, fan-out vote O18):
 
 | flies | median first alert ↓ | look-alikes alerted ↓ | false alert seconds ↓ | train + 5 files |
 |---|---|---|---|---|
-| **5 (default)** | **+64 s** | 24/50 | 0/2809 | 138 s |
-| 10 | +366 s | **18/50** | 0/2809 | 155 s |
-| 15 | +620 s | 17/50 | 0/2809 | 172 s |
-| 20 | +368 s | 19/50 | 0/2809 | 206 s |
-| 30 | +366 s | 19/50 | 0/2809 | 253 s |
-| 50 | +366 s | 19/50 | 0/2809 | 426 s |
+| **5 (default)** | +87 s | **23/50** | 0/2809 | **198 s** |
+| 10 | +75 s | 25/50 | 0/2809 | 254 s |
+| 15 | +78 s | 25/50 | 0/2809 | 290 s |
+| 20 | +80 s | 25/50 | 0/2809 | 307 s |
+| 30 | +75 s | 24/50 | 0/2809 | 390 s |
+| 50 | **+70 s** | 27/50 | 0/2809 | 715 s |
 
 ![ROI of more flies](docs/flies_roi.png)
 
-More flies are not worth it. Every count catches 10/10 without false alarms (since E9; before, 15+
-flies had over 100 false-alarm seconds). Extra individuals alert on about 5 fewer look-alikes, but
-rule D then waits five times as long, because most individuals are slow on their own (E9 table)
-and summing averages toward them. The default stays at 5 flies. Times are from a run with nothing
-else on the GPU (the latest sweep shared it with a game; its times are in
-`data/runs/flies_time_busy_gpu.txt`). Raw scorecards are in `data/runs/flies*_eval_*.txt`;
-`tools/flies_roi.py` redraws the graph.
+More flies are still not worth it, for a different reason than before. Every count catches 10/10
+without a false alert second under rule D. More individuals now make it a little faster (50 flies:
+17 s sooner) instead of five times slower (the first sweep, before L8's calibration file and E9,
+where most individuals were slow on their own), but they alert on up to 4 more look-alikes and
+cost 3.6 times the wall time. The single fly alone gets faster still (+78 s to +41 s) but starts
+raising false alert seconds (up to 4). The default stays at 5 flies. Raw scorecards are in
+`data/runs/flies*_eval_*.txt` (the first sweep's in `data/runs/old_roi/`); `tools/flies_roi.py`
+redraws the graph.
 
 Open directions for Phase 3: per-entity learning from look-alike labels, a coordinator that learns
 how much to trust each fly, and above all real data (O4) before drawing conclusions from one
@@ -1226,7 +1287,7 @@ count as false):
 |---|---|---|---|---|---|
 | **single fly** | 21 | 21 | **0** | **10** | +78 s |
 | **network fly** | 27 | 22 | 5 | 9 | **+36 s** |
-| identity fly | 27 | 26 | 1 | 10 | +260 s |
+| identity fly | 18 | 18 | **0** | 10 | +248 s |
 | dns fly | 13 | 10 | 3 | 10 | +610 s |
 | endpoint fly | 18 | 8 | 10 | 6 | +498 s |
 | count: processes | 10 | 10 | 0 | 10 | +428 s |
@@ -1240,18 +1301,23 @@ count as false):
 
 | detector | alarm episodes | about the attack | false | incidents named | median first naming |
 |---|---|---|---|---|---|
-| identity fly (Phase 11: counts only, votes only with fan-out) | 10 | 4 | **6** | 2 | +6668 s |
+| **identity fly (O20: fine count scale)** | 26 | 19 | **7** | 2 | +5503 s |
+| identity fly (Phase 11: counts only, votes only with fan-out) | 10 | 4 | 6 | 2 | +6668 s |
 | identity fly (Phase 9: counts only) | 12 | 5 | 7 | 2 | +4415 s |
 | identity fly (Phase 8: names and counts) | 41 | 6 | 35 | 3 | +909 s |
 | dns fly (Phase 11: votes only with fan-out) | 0 | 0 | **0** | 0 | |
 | dns fly (before) | 73 | 1 | 72 | 1 | +9089 s |
-| single fly | 32 | 0 | 32 | 0 | |
+| single fly | 33 | 0 | 33 | 0 | |
 | endpoint fly | 44 | 0 | 44 | 0 | |
 | **count: failed users** | 45 | **33** | **12** | 2 | +4988 s |
 | count: users | 5 | 2 | 3 | 1 | +12372 s |
 | count: logon destinations | 12 | 2 | 10 | 1 | +9562 s |
 | count: processes | 43 | 0 | 43 | 0 | |
 | isolation forest | 9 | 0 | 9 | 0 | |
+
+![Flies against baselines on the final sets](docs/accuracy.png)
+
+`uv run --with matplotlib tools/accuracy_plot.py` redraws it from the two tables above.
 
 What it says:
 - **Where the flies win: learning who is normal.** The authorised scanner sets the port count's
@@ -1261,13 +1327,16 @@ What it says:
   input was far more precise (73% of its episodes about the attack, the fly's 15%): the fly reacted
   to new names, which a big network is full of (O16). Smelling only the counts (Phase 9) brought it
   to 42% with 7 false episodes against the count's 12, and voting only with fan-out (Phase 11) to
-  40% with 6; the count still finds far more episodes (33 against 4) and both name 2 of 6 incidents.
-- **The flies' false alarms on LANL** (184 episodes in 12 hours over four flies; 82 since Phase 11)
-  come from calibrating on one afternoon and watching mornings and other days. The 82 left are the
-  endpoint fly's busy servers (44, real fan-out: up to 109 processes a minute) and the single fly (32).
+  40% with 6. A fine count scale (O20) took it to 73%, the count's own precision, with 7 false
+  episodes against 12; the count still finds more episodes (33 against 19), both name 2 of 6
+  incidents, and the count names them sooner.
+- **The flies' false alarms on LANL** (184 episodes in 12 hours over four flies; 84 now) come from
+  calibrating on one afternoon and watching mornings and other days. Most are the endpoint fly's
+  busy servers (44, real fan-out: up to 109 processes a minute) and the single fly (33), neither of
+  which can see this red team: it shows only in logons.
 - The isolation forest, a standard model, is the weakest detector in both worlds.
 
-Raw runs: `data/runs/p8/` (Phase 9 rows: `data/runs/p9f/`).
+Raw runs: `data/runs/p8/` (Phase 9 rows: `data/runs/p9f/`; O20: `data/runs/o20f/`).
 
 ## Phase 9: how many, not who
 
@@ -1307,6 +1376,30 @@ moved these since: LANL identity 10, 4, 6; synthetic identity 94 false seconds.)
 **Tried and reverted:** giving the count-only fly every glomerulus, one separate block per count
 bucket. The readout rose with the count for the first time, but ordinary logons got 12 times
 noisier and LANL precision fell (O16).
+
+**A fine count scale (O20).** On LANL eval the failed-users count named all 3 red-team incidents
+at +246 s, the fly 2 at +785 s. Neither more attacks to learn from (20 hours around 98 red-team
+logons instead of 4 hours around 11) nor labelling the attacker's own traffic as an attack changed
+that. A per-second trace did: the count alarms above 3 failed accounts, the fly only from about 7,
+because the power-of-two code puts 4-7 in a bucket that shares 3 of 4 glomeruli with the 2-3 every
+busy computer reaches. Now a history-only fly gets raw counts on a fine scale: every count up to 12
+its own bucket, then powers of two (`fine_bucket`), over all 53 glomeruli instead of 20, so 5
+failed accounts share 1 glomerulus with 2 (Lean `fine_separates_small`). Unlike the reverted
+disjoint code above, neighbouring counts still overlap. `FLYSOC_FINE=0` turns it off.
+
+| | before | fine scale |
+|---|---|---|
+| *chosen on* LANL eval, identity fly | 10 episodes, 10 about the attack, 0 false; 2 of 3 named, +785 s | 17, 15, 2; 2 of 3, **+135 s** |
+| *chosen on* synthetic eval, rule D | +87 s, 23/50, 0 false s | the same |
+| *chosen on* synthetic eval, rule E / identity fly | 34/50, 5 s / 22 false s | 35/50, 16 s / 40 false s |
+| LANL final, identity fly | 10 episodes, 4 about the attack, 6 false | **26, 19, 7** (73%; the count: 45, 33, 12) |
+| synthetic final, identity fly | 94 false s, 17/50 | **8 false s, 15/50** |
+| synthetic final, rule D / E | +89 s, 2 s / +75 s, 45 s | +89 s, 2 s / +75 s, **2 s** |
+| synthetic final queue, D / E | 84% / 82% | **87% / 85%** |
+
+The synthetic eval set got a little noisier and the final set much quieter: with 10 intrusions per
+set, that spread is the noise. On LANL the fly now matches the count's precision and finds 19
+attack episodes to its 33; both name 2 of 6 incidents, the count sooner.
 
 **Still to do in Phase 9:** integrating over time with circuits from the connectome, judged against
 the failed-users count on LANL.
@@ -1467,7 +1560,7 @@ enabling GL as well loads the OpenGL and Mesa drivers too.
 | `tools/convert.py` | FlyWire export → `data/fly.bin` |
 | `tools/gen_traffic.py`, `tools/gen_intrusion.py` | Synthetic telemetry with labelled attacks and benign look-alikes |
 | `tools/red.py` | Phase 4 red team: evolves the intrusion, retrains blue |
-| `tools/scorecards.py`, `tools/flies_roi.py`, `tools/phase4_plots.py` | Scorecard aggregation and the graphs in `docs/` |
+| `tools/scorecards.py`, `tools/flies_roi.py`, `tools/phase4_plots.py`, `tools/accuracy_plot.py` | Scorecard aggregation and the graphs in `docs/` |
 | `tools/o9.py` | Per-fly, per-stage evidence against thresholds on red's replays, and seconds above (L8, O12, O13) |
 | `tools/attribution.py` | Entity-aware scoring of JSON alerts as an analyst's queue: precision per alert (M10) |
 | `tools/cases.py` | Scores the cases the coordinator groups alerts into (O14) |

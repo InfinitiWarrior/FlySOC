@@ -7,7 +7,8 @@ use sim::{BRAIN_ADAPT, Fly, Plastic, STEPS_PER_MS, Sim, Synapses};
 use std::time::Instant;
 
 const USAGE: &str = "usage: flysoc [view | bench | detect [--train <labelled.jsonl>] <baseline.jsonl> <events.jsonl>
-              | cluster <labelled.jsonl> <events.jsonl> | watch <labelled.jsonl> <events.jsonl>
+              | cluster <labelled.jsonl> <events.jsonl> | cover <labelled.jsonl> <events.jsonl>
+              | watch <labelled.jsonl> <events.jsonl>
               | snapshot <labelled.jsonl> <events.jsonl> <second> <out.ppm>]
 fly brain is read from $FLYSOC_FLY, default data/fly.bin";
 
@@ -33,6 +34,7 @@ fn main() {
         ["detect", base, events] => detect(&fly, syn, None, base, events),
         ["detect", "--train", train, base, events] => detect(&fly, syn, Some(train), base, events),
         ["cluster", train, events] => cluster::run(&fly, syn, train, events),
+        ["cover", train, events] => cluster::cover(&fly, syn, train, events),
         _ => Err(USAGE.into()),
     };
     if let Err(e) = r {

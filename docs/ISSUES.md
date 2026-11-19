@@ -288,44 +288,72 @@ code glomerulus for glomerulus.
 **Where this stands**: four attempts (global learning rates, two sleeps, a disjoint code) moved the
 readout or the noise, never the precision past the default history-only fly. On LANL final it is on
 par with a plain count of its input (7 false episodes against 12, 5 attack episodes against 33;
-since O18's fan-out vote 6 and 4).
+since O18's fan-out vote 6 and 4). Since O20's fine count scale 7 false and 19 attack episodes (73%, the count's precision). At the readout the trained fly passes on 1.4 times more of a red team second's drive than of
+a harmless one's, against 5 times on synthetic data (O19).
 
-### O17. Sleep that overwrites the day's weights destroys what attacks taught (P10, fixed; no gain yet)
-**Symptom**: `MushroomBody::sleep` as first built set every output weight to
-$w^0 e^{-f/r}$ from its safe-second frequency $f$, replacing the day's weight. Eval sets
-(`data/runs/p10/z*`):
+### O19. Training lights every Kenyon cell: the trained-fly guarantee is nearly empty (P5)
+**Symptom**: Lean's `drive_loss_le_overlap` says training can only take an odour's drive through
+Kenyon cells harmless traffic lit. `flysoc cover` measured how much of the drive goes through the
+other cells: a median of 0 in every fly, attack or not, on LANL and synthetic final sets. Only 1%
+of LANL red team seconds have any such drive (identity fly), 8% of synthetic intrusion seconds
+(identity), 55% (single fly), 89% (DNS fly). No second of 409,000 broke the theorem.
+**Cause**: the guarantee is about cells *never* lit, and over a training day of 4 hours (LANL)
+every Kenyon cell fires in some harmless second. The fly separates attacks by how far the weights
+were depressed, which the theorem does not bound (without sleep, only $w_j > 0$).
+**What it showed instead**: the trained-to-untrained drive ratio. Synthetic identity fly: 0.287 in
+intrusion seconds against 0.055 in harmless ones (5x). LANL: 0.019 against 0.013 (1.4x). The
+trained LANL identity fly barely passes on more of the red team's drive than of the background's,
+the readout-level face of O16. The single fly on LANL passes on 0.3% of either.
+**Where this stands**: open. A graded guarantee would bound the weight by how often a cell was lit
+(sleep's floor $w^0_j e^{-f_j/r}$ is one, `sleep_bounded`), but sleep did not help (O17). The real
+fix is upstream: odours whose Kenyon cells differ from the background's (Phase 9).
+**Where**: `MushroomBody::cover` (detect.rs), `cluster::cover`, `flysoc cover`.
+**Lesson**: check what a proof covers on the real data before calling it a property of the trained
+system; a true theorem can be vacuous in practice.
 
-| | LANL eval, identity episodes attack / false | synthetic eval, rule D | synthetic network fly |
-|---|---|---|---|
-| no sleep (default) | 10 / 0 | +87 s, 23/50, 0 false s | 10/10, +34 s |
-| sleep, r = 0.005 | 10 / 0 | +624 s, 12/50, 0 | 6/10, +324 s |
-| sleep, r = 0.02 | 12 / 1 | +633 s, 10/50, 0 | 10/10, +53 s |
-
-The probe (README "Phase 9") still showed no readout response rising with the failed-users count.
-**Cause**: sleep ignored attack seconds and threw away the day's weights, including what attack
-seconds restored. Kenyon cells are shared between odours: a cell that signals a scan also fires in
-ordinary traffic, so its frequency is high and sleep silenced it. The Lean theorem
-`night_forgets_the_weight` states the overwrite exactly; it holds, and it is the flaw.
-**Fix**: sleep only gives weight back, $w \leftarrow \max(w, w^0 e^{-f/r})$ (`MushroomBody::sleep`,
-`floor`): what attacks and common patterns taught by day stays, a pattern met harmlessly once or
-twice is restored. Lean: `sleep_never_lowers`, `sleep_keeps_day_learning`,
-`days_and_nights_bounded` replace the overwrite theorem; the Rust tests fail on the overwrite
-version (4 tests) and on min for max (9).
-
-| restore-only sleep | LANL eval, identity attack / false | synthetic eval, rule D | rule E | network fly |
-|---|---|---|---|---|
-| r = 0.005 | 11 / 0 | +87 s, 23/50, 0 false s | +74 s, 34/50, 5 | 10/10, +34 s |
-| r = 0.02 | 10 / 1 | +88 s, 23/50, 0 | +78 s, 34/50, 5 | 10/10, +34 s |
-
-Safe: synthetic results are the default's to the second. But it changes nothing that matters, and
-the probe is still flat (readout added per logon at counts 1..16: 0, 0, 1, 1, 0, 16, 5, 0, ...,
-7; count 6 responds in every variant, so that is the background, not the count). Sleep stays
-opt-in (`FLYSOC_SLEEP=1`), off by default.
-**Lesson**: the hypothesis behind it, that one harmless sighting over-depresses a rare count's
-synapses, is mostly wrong. With one failure a minute the 60-second code always reads 1, and
-neighbouring 15-minute buckets share 3 of 4 glomeruli (ordinal code, O7), so a count of 16 lights
-nearly the same Kenyon cells as a count of 2. No learning rule can separate cells the encoding has
-merged: the next step is the encoding (Phase 9).
+### O20. On LANL the identity fly could not smell a handful of failed logons (P9; fine scale, partly fixed)
+**Symptom**: on LANL eval (day 8, 3 red-team incidents) a plain count of distinct failed users per
+source names all 3 at a median +246 s (38 episodes, 35 about the attack); the identity fly 2 at
++785 s (10 episodes, all about the attack).
+**What it was not: labels or too few attacks.** Two suspects, both measured on eval and rejected:
+- *The attacker's traffic was trained as safe.* LANL labels only red-team logons, so the training
+  slice had 11 attack events and 6,006 flows (plus 1 failed logon) from the attacking computer
+  `C17693` labelled benign. `tools/lanl.py --attacker` labels every event of a red-team source
+  within 30 min of its red-team logons (5,851 in that slice). Identity fly: 10 episodes, 9 about the
+  attack, 1 false, named 2 of 3 (unchanged); endpoint fly 7 false instead of 3.
+- *Too few attacks to learn from.* `train_rt.jsonl`: 8 windows, about 20 hours, around every
+  red-team burst on days that are neither eval nor final (1, 2, 5, 9, 15, 26, 29; windows in
+  `data/telemetry/lanl/train_rt.windows`), 98 red-team logons in 11 incidents instead of 11.
+  Identity fly: 14 episodes, 12 about the attack, 2 false, named 2 of 3, +781 s. With `--attacker`
+  as well (10,290 labelled events): 16 episodes, 13 about, 3 false, the same naming.
+**Cause**: every red-team logon on eval succeeds; the count works because the attacker also fails
+logons with other accounts, which LANL does not label. A per-second trace (`FLYSOC_TRACE`) against
+the attacker's 15-minute failed-user count: while it was 1-6 (80 seconds) the fly's evidence never
+crossed its threshold; from 7 on (30 seconds, eval_2 only) it did in 21. In eval_1 the attacker
+never passed 5. The count's own threshold is 3. The power-of-two code puts 4-7 in one bucket
+sharing 3 of 4 glomeruli with 2-3, which every busy source reaches daily and training marks safe;
+and the history-only identity fly used only 20 of its 53 glomeruli (the 33 field glomeruli idle).
+**Fix**: default since O20 (`FLYSOC_FINE=0` turns it off), `Encoder::fine`: a history-only fly smells raw counts on a fine
+scale, every count up to 12 its own bucket, then powers of two (`fine_bucket`), over all 53
+glomeruli (two codes of 26). A count of 5 now shares 1 glomerulus with 2, 6 none.
+`History::observe` now hands encoders raw counts; flies with fields still bucket them by powers of
+two (`log_bucket`), so their odours are unchanged.
+**Results**: LANL eval (chosen on): identity fly 17 episodes, 15 about the attack, 2 false, 2 of 3
+named at +135 s (before 10, 10, 0, +785 s; eval_1's first incident at +24 s instead of +1513 s).
+The fine scale with the 20-hour training set named all 3 but with 9 false episodes, so training
+stays on the 4-hour slice. Synthetic eval: rule D unchanged, E 35/50 and 16 false seconds (before
+34/50, 5), identity fly 40 false seconds (22). Final, once: LANL identity fly 26 episodes, 19 about
+the attack, 7 false (before 10, 4, 6; the failed-users count 45, 33, 12); synthetic identity fly 8
+false seconds (94), rules A, B, C, E 2-12 (38-81), D unchanged, queues 87% and 85% (84%, 82%).
+A bug caught by the test (13 shared 12's bucket, larger counts one bucket low) was fixed and the
+eval re-run before the final runs; LANL eval was identical.
+**Where this stands**: the fly now matches the count's precision on LANL final and finds 19 attack
+episodes to its 33; both name 2 of 6 incidents. Still missing: the evening incident of eval_1
+(count at most 5, sparse) and speed on LANL final (count +4988 s, fly +5503 s).
+**Where**: `fine_bucket`, `log_bucket`, `Encoder::fine`, `Encoder::neurons` (detect.rs);
+`cluster::fine`; `tools/lanl.py` (`--attacker`, several windows); runs in `data/runs/o20/`.
+**Lesson**: two plausible causes (labels, data volume) were cheap to test and wrong; the per-second
+trace against the competing detector's own score found the real one in minutes.
 
 ## Solved: measurement and alerts (since Phase 8)
 
@@ -734,6 +762,43 @@ backgrounds were not enough to judge red: they said this fixed the slow scan, 20
 ---
 
 ## Solved: circuit and learning
+
+### O17. Sleep that overwrites the day's weights destroys what attacks taught (P10, fixed; no gain yet)
+**Symptom**: `MushroomBody::sleep` as first built set every output weight to
+$w^0 e^{-f/r}$ from its safe-second frequency $f$, replacing the day's weight. Eval sets
+(`data/runs/p10/z*`):
+
+| | LANL eval, identity episodes attack / false | synthetic eval, rule D | synthetic network fly |
+|---|---|---|---|
+| no sleep (default) | 10 / 0 | +87 s, 23/50, 0 false s | 10/10, +34 s |
+| sleep, r = 0.005 | 10 / 0 | +624 s, 12/50, 0 | 6/10, +324 s |
+| sleep, r = 0.02 | 12 / 1 | +633 s, 10/50, 0 | 10/10, +53 s |
+
+The probe (README "Phase 9") still showed no readout response rising with the failed-users count.
+**Cause**: sleep ignored attack seconds and threw away the day's weights, including what attack
+seconds restored. Kenyon cells are shared between odours: a cell that signals a scan also fires in
+ordinary traffic, so its frequency is high and sleep silenced it. The Lean theorem
+`night_forgets_the_weight` states the overwrite exactly; it holds, and it is the flaw.
+**Fix**: sleep only gives weight back, $w \leftarrow \max(w, w^0 e^{-f/r})$ (`MushroomBody::sleep`,
+`floor`): what attacks and common patterns taught by day stays, a pattern met harmlessly once or
+twice is restored. Lean: `sleep_never_lowers`, `sleep_keeps_day_learning`,
+`days_and_nights_bounded` replace the overwrite theorem; the Rust tests fail on the overwrite
+version (4 tests) and on min for max (9).
+
+| restore-only sleep | LANL eval, identity attack / false | synthetic eval, rule D | rule E | network fly |
+|---|---|---|---|---|
+| r = 0.005 | 11 / 0 | +87 s, 23/50, 0 false s | +74 s, 34/50, 5 | 10/10, +34 s |
+| r = 0.02 | 10 / 1 | +88 s, 23/50, 0 | +78 s, 34/50, 5 | 10/10, +34 s |
+
+Safe: synthetic results are the default's to the second. But it changes nothing that matters, and
+the probe is still flat (readout added per logon at counts 1..16: 0, 0, 1, 1, 0, 16, 5, 0, ...,
+7; count 6 responds in every variant, so that is the background, not the count). Sleep stays
+opt-in (`FLYSOC_SLEEP=1`), off by default.
+**Lesson**: the hypothesis behind it, that one harmless sighting over-depresses a rare count's
+synapses, is mostly wrong. With one failure a minute the 60-second code always reads 1, and
+neighbouring 15-minute buckets share 3 of 4 glomeruli (ordinal code, O7), so a count of 16 lights
+nearly the same Kenyon cells as a count of 2. No learning rule can separate cells the encoding has
+merged: the next step is the encoding (Phase 9).
 
 ### L1. In the whole brain, every input looked the same to the mushroom body (P2)
 **Symptom**: scan, burst and spontaneous ignitions each fired about 3,200 of 5,177 Kenyon cells (60%),

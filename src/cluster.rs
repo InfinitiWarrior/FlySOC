@@ -66,6 +66,11 @@ fn history_only() -> Vec<String> {
     let v = std::env::var("FLYSOC_HISTORY_ONLY").unwrap_or_else(|_| HISTORY_ONLY.into());
     v.split(',').filter(|r| !r.is_empty()).map(str::to_string).collect()
 }
+/// History-only flies smell counts on the fine scale (`Encoder::fine`, O20); FLYSOC_FINE=0 gives
+/// them the power-of-two scale of the flies with fields.
+fn fine() -> bool {
+    std::env::var("FLYSOC_FINE").map_or(true, |v| v != "0")
+}
 /// FLYSOC_SLEEP=1: after training, the flies sleep (Phase 10, `MushroomBody::sleep`).
 fn sleeps() -> bool {
     std::env::var("FLYSOC_SLEEP").is_ok_and(|v| v == "1")
@@ -84,6 +89,8 @@ pub struct Cluster {
     pub sim: Sim,
     pub encs: Vec<Encoder>,
     pub thresholds: Vec<f64>,
+    /// The mushroom body as training left it, with its day counters; only when freshly trained.
+    pub trained: Option<MushroomBody>,
 }
 
 /// Puts one copy of the circuit per fly into a single simulation, trains every fly on its own
@@ -91,7 +98,7 @@ pub struct Cluster {
 /// `train` and CALIBRATION. The result is cached in data/cache/, keyed on the training file, the
 /// calibration file and the FlySOC binary, so a
 /// rebuild or different training data retrains, and anything else loads in a moment.
-pub fn build(device: &wgpu::Device, queue: &wgpu::Queue, circuit: Fly, syn: Synapses, train_path: &str) -> Result<Cluster, String> {
+pub fn build(device: &wgpu::Device, queue: &wgpu::Queue, circuit: Fly, syn: Synapses, train_path: &str, fresh: bool) -> Result<Cluster, String> {
     let (syn, one) = MushroomBody::split(&circuit, syn);
     let (k, n) = (FLIES.len() * replicas(), circuit.n);
     let mut mb = one.replicate(k, n);
@@ -105,7 +112,7 @@ pub fn build(device: &wgpu::Device, queue: &wgpu::Queue, circuit: Fly, syn: Syna
                     true => Encoder::new(&circuit, kinds).shard(r, replicas()),
                     false => Encoder::new(&circuit, kinds).individual(r as u8),
                 };
-                if history_only().iter().any(|h| h == name) { e.history_only() } else { e }
+                if history_only().iter().any(|h| h == name) { if fine() { e.history_only().fine() } else { e.history_only() } } else { e }
             })
         })
         .collect();
@@ -115,11 +122,11 @@ pub fn build(device: &wgpu::Device, queue: &wgpu::Queue, circuit: Fly, syn: Syna
     let calib_bytes = std::fs::read(&calib_path).map_err(|e| format!("{calib_path}: {e} (run tools/gen_intrusion.py)"))?;
     let exe = std::env::current_exe().and_then(std::fs::read).unwrap_or_default();
     let key = detect::fnv(&train_bytes) ^ detect::fnv(&exe).rotate_left(1) ^ detect::fnv(&calib_bytes).rotate_left(2);
-    let cache = format!("data/cache/cluster{k}{}{}-{key:016x}.bin", if sharded() { "s" } else { "" }, history_only().join("+") + if sleeps() { "z" } else { "" });
-    if let Some((w, thresholds)) = load_cache(&cache, mb.plastic.w.len(), FLIES.len()) {
+    let cache = format!("data/cache/cluster{k}{}{}-{key:016x}.bin", if sharded() { "s" } else { "" }, history_only().join("+") + if sleeps() { "z" } else { "" } + if fine() { "f" } else { "" });
+    if let Some((w, thresholds)) = load_cache(&cache, mb.plastic.w.len(), FLIES.len()).filter(|_| !fresh) {
         sim.set_plastic(queue, &w);
         eprintln!("loaded the trained cluster from {cache}");
-        return Ok(Cluster { circuit, sim, encs, thresholds });
+        return Ok(Cluster { circuit, sim, encs, thresholds, trained: None });
     }
 
     let train = detect::read_events(train_path)?;
@@ -162,7 +169,7 @@ pub fn build(device: &wgpu::Device, queue: &wgpu::Queue, circuit: Fly, syn: Syna
     if let Err(e) = save_cache(&cache, &mb.plastic.w, &thresholds) {
         eprintln!("could not cache the trained cluster: {e}");
     }
-    Ok(Cluster { circuit, sim, encs, thresholds })
+    Ok(Cluster { circuit, sim, encs, thresholds, trained: Some(mb) })
 }
 
 /// Cache file: u32 fly count, u32 weight count, f64 threshold per fly, f32 plastic weights.
@@ -326,11 +333,40 @@ fn named(now: &[bool], suspects: &[Vec<String>], entity: &str) -> Vec<String> {
     v
 }
 
+/// `flysoc cover`: trains afresh, then prints per second and fly "second, fly, trained drive,
+/// untrained drive, unlit drive, attack?" for `events` (`MushroomBody::cover`): how much of what
+/// reaches each MBON comes through Kenyon cells harmless training never lit, the part Lean's
+/// `drive_loss_le_overlap` says training can never take.
+pub fn cover(fly: &Fly, syn: Synapses, train: &str, events: &str) -> Result<(), String> {
+    let events = detect::read_events(events)?;
+    let (circuit, syn) = detect::circuit(fly, &syn);
+    let (_, device, queue) = crate::sim::device(&crate::sim::instance(None), None);
+    let c = build(&device, &queue, circuit, syn, train, true)?;
+    let mb = c.trained.as_ref().expect("fresh training keeps the mushroom body");
+    let seconds = detect::duration(&events);
+    let mut player = Player::new(&device, &queue, &c.sim, c.circuit.n, &c.encs, &events);
+    let (mut s, mut out) = (0, String::new());
+    while player.second() < seconds {
+        let Some(labels) = player.step(&device, &queue, &c.sim) else { continue };
+        let fired = c.sim.take_fired(&device, &queue);
+        for (f, l) in labels.iter().enumerate() {
+            let [w, w0, unlit] = mb.cover(&fired, f, c.circuit.n);
+            let attack = l.iter().any(|x| x.starts_with("intrusion"));
+            if w0 > 0.0 {
+                out += &format!("{s}\t{}\t{w:.1}\t{w0:.1}\t{unlit:.1}\t{attack}\n", FLIES[f / replicas()].0);
+            }
+        }
+        s += 1;
+    }
+    print!("{out}");
+    Ok(())
+}
+
 pub fn run(fly: &Fly, syn: Synapses, train: &str, events: &str) -> Result<(), String> {
     let events = detect::read_events(events)?;
     let (circuit, syn) = detect::circuit(fly, &syn); // the full connectome is dropped here
     let (_, device, queue) = crate::sim::device(&crate::sim::instance(None), None);
-    let c = build(&device, &queue, circuit, syn, train)?;
+    let c = build(&device, &queue, circuit, syn, train, false)?;
     for (f, (name, _)) in FLIES.iter().enumerate() {
         eprintln!("{name:>10}: fires above {:.1} MBON spikes/s ({EVIDENCE_S} s average)", c.thresholds[f]);
     }
@@ -734,7 +770,7 @@ impl Driver for Watch {
 
     fn start(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
         let (circuit, syn) = self.circuit.take().expect("started once");
-        let c = build(device, queue, circuit, syn, &self.train).unwrap_or_else(|e| {
+        let c = build(device, queue, circuit, syn, &self.train, false).unwrap_or_else(|e| {
             eprintln!("{e}");
             std::process::exit(1)
         });

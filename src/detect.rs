@@ -145,6 +145,23 @@ impl MushroomBody {
 
 
 impl MushroomBody {
+    /// Fly `f`'s MBON drive in a window, `[trained, untrained, unlit]`: sum of w x, of w0 x, and of
+    /// w0 x over the synapses whose Kenyon cell never fired in a safe window since the last sleep.
+    /// Lean `drive_loss_le_overlap`: training can never take the unlit part (Phase 5's measure).
+    pub fn cover(&self, fired: &[u32], f: usize, n: u32) -> [f64; 3] {
+        let p = &self.plastic;
+        let mut d = [0.0; 3];
+        for j in self.of_fly(f, n) {
+            let x = fired[p.pre[j] as usize] as f64;
+            d[0] += p.w[j] as f64 * x;
+            d[1] += self.w0[j] as f64 * x;
+            d[2] += if self.seen[j] == 0 { self.w0[j] as f64 * x } else { 0.0 };
+        }
+        d
+    }
+}
+
+impl MushroomBody {
     /// Sleep (Phase 10): every output synapse is restored to at least w0 * exp(-f / RARE), f being
     /// how often its Kenyon cell fired in safe windows since the last sleep. It only gives weight
     /// back: what attacks and common patterns taught by day stays, while a pattern met harmlessly
@@ -279,7 +296,6 @@ impl History {
     /// them (the longest window's), and the entities (hosts, users) the count is about.
     pub fn observe(&mut self, e: &Event) -> Seen {
         let f = |o: &Option<String>| o.clone().unwrap_or_default();
-        let bucket = |n: usize| usize::BITS - n.leading_zeros();
         let (name, (short, long), slow) = match e.kind.as_str() {
             // distinct ports this source touched: a scan touches many
             "conn" => ("src_ports", self.distinct(format!("ports<{}", f(&e.src)), e.ts, Some(e.dport.unwrap_or(0).to_string()), LONG_HISTORY_S), true),
@@ -297,9 +313,10 @@ impl History {
             }
             _ => return Seen::default(),
         };
-        let mut components = vec![format!("{name}={}", bucket(short))];
+        // raw counts: each fly's encoder picks its own scale (`Encoder::neurons`)
+        let mut components = vec![format!("{name}={short}")];
         if slow {
-            components.push(format!("{name}_long={}", bucket(long)));
+            components.push(format!("{name}_long={long}"));
         }
         Seen { components, count: long, entities: e.entities(), what: name }
     }
@@ -366,7 +383,20 @@ pub struct Encoder {
     salt: u8,                 // individual fly: which glomeruli each feature lands on (0 = the original)
     shard: (u64, u64),        // (k, n): smells only events whose source hashes to k of n (O15)
     fields: bool,             // false: smells only history components, not the event's fields (P9)
+    fine: bool,               // with !fields: the fine count scale over all glomeruli (O20)
 }
+
+/// Power-of-two bucket of a count: 0, 1, 2-3, 4-7, ... (Lean `bucket`).
+pub fn log_bucket(n: u64) -> u64 {
+    (u64::BITS - n.leading_zeros()) as u64
+}
+
+/// The fine scale (O20): every count up to FINE_LINEAR its own bucket, then powers of two, so a
+/// source failing with 5 accounts no longer smells like one failing with 2.
+pub fn fine_bucket(n: u64) -> u64 {
+    if n <= FINE_LINEAR { n } else { FINE_LINEAR + 1 + log_bucket(n) - log_bucket(FINE_LINEAR) }
+}
+const FINE_LINEAR: u64 = 12;
 
 impl Encoder {
     pub fn new(fly: &Fly, kinds: &[&str]) -> Self {
@@ -374,12 +404,17 @@ impl Encoder {
         for i in fly.of_class("olfactory") {
             by_type.entry(fly.cell_type[i as usize]).or_default().push(i);
         }
-        Self { glomeruli: by_type.into_values().collect(), kinds: kinds.iter().map(|k| k.to_string()).collect(), salt: 0, shard: (0, 1), fields: true }
+        Self { glomeruli: by_type.into_values().collect(), kinds: kinds.iter().map(|k| k.to_string()).collect(), salt: 0, shard: (0, 1), fields: true, fine: false }
     }
 
     /// Smells how many (history), not who (fields): names are novel everywhere on a big network.
     pub fn history_only(self) -> Self {
         Self { fields: false, ..self }
+    }
+
+    /// A history-only fly's counts on the fine scale, spread over all its glomeruli (O20).
+    pub fn fine(self) -> Self {
+        Self { fine: !self.fields, ..self }
     }
 
     /// Watches one part of the network: events whose source (or host) hashes to `k` of `n`.
@@ -406,7 +441,7 @@ impl Encoder {
         // magnitudes overlap and distant ones never do, the same in every individual (O7).
         let two = self.kinds.iter().any(|k| k != "proc");
         let wanted = if two { HISTORY_GLOMERULI_TWO_CODES } else { HISTORY_GLOMERULI };
-        let reserved = wanted.min(self.glomeruli.len() / 2) as u64;
+        let reserved = if self.fine { self.glomeruli.len() } else { wanted.min(self.glomeruli.len() / 2) } as u64;
         let fields = self.glomeruli.len() as u64 - reserved;
         let features = if self.fields { e.features() } else { vec![] };
         let hashed = features.into_iter().flat_map(move |feature| {
@@ -420,7 +455,8 @@ impl Encoder {
         let size = reserved / codes;
         let ordinal = history.iter().flat_map(move |h| {
             let (name, bucket) = h.rsplit_once('=').unwrap_or((h, "0"));
-            let bucket = bucket.parse::<u64>().unwrap_or(0);
+            let n = bucket.parse::<u64>().unwrap_or(0);
+            let bucket = if self.fine { fine_bucket(n) } else { log_bucket(n) };
             let offset = fields + if codes == 2 && name.ends_with("_long") { size } else { 0 };
             (0..GLOMERULI_PER_HISTORY as u64).map(move |k| offset + (bucket + k).min(size - 1))
         });
@@ -689,7 +725,7 @@ mod tests {
         assert!(fired(&Event { kind: "dns".into(), ..Default::default() }).is_none(), "other kinds pass by");
         // 3 glomeruli: 1 reserved for history (type C, neurons 5-6), fields hash into A and B
         assert!((0..50).all(|p| fired(&ev(p)).unwrap().iter().all(|&n| n < 5)), "fields never reach history glomeruli");
-        let hist = enc.neurons(&ev(443), &["src_ports=6".into()]).unwrap().collect::<Vec<u32>>();
+        let hist = enc.neurons(&ev(443), &["src_ports=32".into()]).unwrap().collect::<Vec<u32>>();
         assert!(hist.contains(&5) && hist.contains(&6), "history lights its reserved glomerulus");
     }
 
@@ -704,19 +740,19 @@ mod tests {
             result: Some("fail".into()),
             ..Default::default()
         };
-        // a typo: the same user failing again stays at 1 distinct user (bucket 1)
+        // a typo: the same user failing again stays at 1 distinct user
         assert_eq!(h.observe(&fail(0.0, "u01")).components, ["src_failed_users=1", "src_failed_users_long=1"]);
         assert_eq!(h.observe(&fail(5.0, "u01")).components, ["src_failed_users=1", "src_failed_users_long=1"]);
-        // a spray: 8 distinct users -> bucket 4 (8..15)
+        // a spray: 8 distinct users
         let mut last: Vec<String> = vec![];
         for (k, u) in ["u02", "u03", "u04", "u05", "u06", "u07", "u08"].iter().enumerate() {
             last = h.observe(&fail(10.0 + k as f64, u)).components;
         }
-        assert_eq!(last, ["src_failed_users=4", "src_failed_users_long=4"]);
+        assert_eq!(last, ["src_failed_users=8", "src_failed_users_long=8"]);
         // a minute later the short count has expired, the long one still sees all 9 users (a slow
         // spray adds up there); the suspect is the failing source and the user
         let seen = h.observe(&fail(100.0, "u09"));
-        assert_eq!(seen.components, ["src_failed_users=1", "src_failed_users_long=4"]);
+        assert_eq!(seen.components, ["src_failed_users=1", "src_failed_users_long=9"]);
         assert_eq!(seen.count, 9);
         // 15 minutes later both have expired
         assert_eq!(h.observe(&fail(1100.0, "u01")).components, ["src_failed_users=1", "src_failed_users_long=1"]);
@@ -869,7 +905,7 @@ mod tests {
         let fly = fly53();
         let enc = Encoder::new(&fly, &["auth"]).history_only();
         let auth = |src: &str, user: &str| Event { kind: "auth".into(), src: Some(src.into()), user: Some(user.into()), result: Some("fail".into()), ..Default::default() };
-        let h = |short: u32, long: u32| vec![format!("src_failed_users={short}"), format!("src_failed_users_long={long}")];
+        let h = |short: u32, long: u32| vec![format!("src_failed_users={}", raw(short)), format!("src_failed_users_long={}", raw(long))];
         assert_eq!(odour(&enc, &auth("C1", "U1"), &[]), Some(vec![]), "no history, no odour: names alone smell of nothing");
         for (sh, lo) in [(0, 0), (1, 1), (1, 5), (3, 4)] {
             assert_eq!(lit(&enc, &auth("C1", "U1"), &h(sh, lo)), lit(&enc, &auth("C17693", "U8946"), &h(sh, lo)), "counts {sh}/{lo}: two different sources must smell the same");
@@ -896,10 +932,35 @@ mod tests {
         let hist = |c: &str| -> std::collections::BTreeSet<u32> { lit(&enc, &e, &[c.to_string()]).difference(&fields).copied().collect() };
         for b in 0..7u32 {
             let want: std::collections::BTreeSet<u32> = (33 + b..33 + b + 4).map(|g| g.min(42)).collect();
-            assert_eq!(hist(&format!("src_failed_users={b}")), want, "short bucket {b}");
+            assert_eq!(hist(&format!("src_failed_users={}", raw(b))), want, "short bucket {b}");
             let want_long: std::collections::BTreeSet<u32> = (43 + b..43 + b + 4).map(|g| g.min(52)).collect();
-            assert_eq!(hist(&format!("src_failed_users_long={b}")), want_long, "long bucket {b}");
+            assert_eq!(hist(&format!("src_failed_users_long={}", raw(b))), want_long, "long bucket {b}");
         }
+    }
+
+    #[test]
+    fn the_fine_scale_tells_a_handful_of_failures_from_two() {
+        // O20: 1..=12 each their own bucket, then powers of two; never decreasing
+        assert_eq!((0..=13).map(fine_bucket).collect::<Vec<_>>(), [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
+        assert_eq!((fine_bucket(15), fine_bucket(16), fine_bucket(1000)), (13, 14, 19));
+        assert!((0..5000).all(|n| fine_bucket(n) <= fine_bucket(n + 1)));
+        let fly = fly53();
+        let enc = Encoder::new(&fly, &["auth"]).history_only().fine();
+        let e = Event { kind: "auth".into(), src: Some("C1".into()), user: Some("U1".into()), result: Some("fail".into()), ..Default::default() };
+        let long = |n: u32| lit(&enc, &e, &[format!("src_failed_users_long={n}")]);
+        // all 53 glomeruli: two codes of 26, the long one on 26..52
+        assert_eq!(long(5), (31..35).collect());
+        assert_eq!(long(5).intersection(&long(2)).count(), 1, "5 shares one glomerulus with 2 (the coarse code: 3)");
+        assert_eq!(long(6).intersection(&long(2)).count(), 0);
+        assert!(long(1000).iter().all(|&g| g <= 51), "the largest counts stay inside the long code");
+        // the fine flag does nothing to a fly that smells fields
+        let full = Encoder::new(&fly, &["auth"]);
+        assert_eq!(lit(&full.fine(), &e, &["src_failed_users_long=5".into()]), lit(&Encoder::new(&fly, &["auth"]), &e, &["src_failed_users_long=5".into()]));
+    }
+
+    /// The smallest count in power-of-two bucket `b`.
+    fn raw(b: u32) -> u32 {
+        if b == 0 { 0 } else { 1 << (b - 1) }
     }
 
     /// `k` Kenyon cells (neurons 0..k), each with one plastic synapse onto neuron k, resting at `w0`.
@@ -1088,6 +1149,10 @@ mod tests {
         // so an odour made of cell 0 drives the trained fly as hard as the untrained one
         // (Lean `novel_drive_untouched`); one made of cell 1 has lost at most its own drive
         assert!(mb.plastic.w[1] > 0.0 && 7.5 - mb.plastic.w[1] <= 7.5);
+        // `cover` splits an odour of both cells: 3 spikes each
+        let [w, w0, unlit] = mb.cover(&spikes(2, &[0, 1], 3), 0, 2);
+        assert_eq!((w0, unlit), (3.0 * 17.5, 30.0), "untrained drive, and the part through cell 0");
+        assert!(w >= unlit && w < w0, "the trained drive keeps the unlit part, loses some of the rest");
     }
 
     #[test]

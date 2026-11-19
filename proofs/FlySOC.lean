@@ -7,7 +7,7 @@ import Mathlib
 
 namespace FlySOC
 
-/-- Power-of-two bucket of a count: `usize::BITS - n.leading_zeros()` in `History::observe`. -/
+/-- Power-of-two bucket of a count: `log_bucket` in `detect.rs` (`u64::BITS - n.leading_zeros()`). -/
 def bucket (n : ℕ) : ℕ := if n = 0 then 0 else Nat.log2 n + 1
 
 /-- Reserved glomeruli lit by bucket `b` in an ordinal code of `size` glomeruli at offset `o`:
@@ -29,6 +29,26 @@ theorem bucket_mono {m n : ℕ} (h : m ≤ n) : bucket m ≤ bucket n := by
 short bucket (`History::distinct` returns both). -/
 theorem long_bucket_ge_short {short long : ℕ} (h : short ≤ long) : bucket short ≤ bucket long :=
   bucket_mono h
+
+/-- The fine scale of a history-only fly (`fine_bucket`, ISSUES O20): every count up to 12 its own
+bucket, then powers of two. -/
+def fineBucket (n : ℕ) : ℕ := if n ≤ 12 then n else 12 + 1 + bucket n - bucket 12
+
+/-- The fine scale never ranks more distinct values lower either. -/
+theorem fineBucket_mono {m n : ℕ} (h : m ≤ n) : fineBucket m ≤ fineBucket n := by
+  have hb : bucket 12 = 4 := by decide
+  have h13 : ∀ k, 13 ≤ k → 4 ≤ bucket k := fun k hk => hb ▸ bucket_mono (by omega)
+  unfold fineBucket
+  split_ifs with hm hn
+  · exact h
+  · have := h13 n (by omega); omega
+  · omega
+  · have := bucket_mono h; omega
+
+/-- Below 13 the fine scale is the count itself, so 5 failed users and 2 sit 3 buckets apart and,
+by `code_overlap`, share one glomerulus; on the power-of-two scale they are neighbours sharing 3. -/
+theorem fine_separates_small : fineBucket 5 - fineBucket 2 = 3 ∧ bucket 5 - bucket 2 = 1 := by
+  decide
 
 /-- Away from the cap, buckets four or more apart light disjoint glomeruli. -/
 theorem code_disjoint {o size b b' : ℕ} (hcap : b' + 3 < size) (h : b + 4 ≤ b') :
