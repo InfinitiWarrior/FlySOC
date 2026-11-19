@@ -1073,6 +1073,24 @@ mod tests {
     }
 
     #[test]
+    fn a_cell_harmless_traffic_never_lit_keeps_its_weight_exactly() {
+        // Lean `unseen_stays`, in f32: cell 0 fires only in attack seconds, cell 1 in safe ones
+        let mut mb = body(&[10.0, 7.5]);
+        for t in 0..500 {
+            match t % 3 {
+                0 => mb.learn(&spikes(2, &[0], 1 + t as u32 % 5), false, 0..2),
+                1 => mb.learn(&spikes(2, &[1], 2), true, 0..2),
+                _ => mb.learn(&spikes(2, &[], 0), true, 0..2),
+            }
+        }
+        assert_eq!(mb.plastic.w[0], 10.0, "never lit by harmless traffic: untouched, bit for bit");
+        assert!(mb.plastic.w[1] < 7.5, "lit by harmless traffic: depressed");
+        // so an odour made of cell 0 drives the trained fly as hard as the untrained one
+        // (Lean `novel_drive_untouched`); one made of cell 1 has lost at most its own drive
+        assert!(mb.plastic.w[1] > 0.0 && 7.5 - mb.plastic.w[1] <= 7.5);
+    }
+
+    #[test]
     fn one_harmless_sighting_no_longer_blinds_the_fly() {
         // the bug sleep fixes (O16): by day, a single harmless sighting with several spikes cuts a
         // synapse by (1 - LR_SAFE)^spikes at once; at night that pattern is rare, so it is restored

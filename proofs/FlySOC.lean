@@ -231,6 +231,58 @@ theorem days_and_nights_bounded {ρ ηs ηr rare w0 : ℝ}
     have hn := sleep_bounded hrare hw0 hday d
     exact ih _ ⟨hn.2.1, hn.2.2⟩
 
+/-! ## What a trained fly can and cannot unlearn (the readout, `MushroomBody` on the GPU)
+
+An MBON is driven by its Kenyon cells through the plastic synapses: a second's drive is
+`Σ w_j x_j` over the synapses, `x_j ≥ 0` the Kenyon cell's spikes. The theorems below hold for
+every training run, so for every trained fly: training can only quiet an odour through the
+Kenyon cells that harmless traffic also lit. -/
+
+/-- A synapse whose Kenyon cell never fired in a safe second keeps its resting weight exactly,
+however long the run and whatever the attacks: recovery and attack learning both pull to `w0`. -/
+theorem unseen_stays (ρ ηs ηr w0 : ℝ) (seconds : List (ℕ × Bool))
+    (h : ∀ s ∈ seconds, s.2 = true → s.1 = 0) :
+    seconds.foldl (fun w s => learn ρ ηs ηr w0 w s.1 s.2) w0 = w0 := by
+  induction seconds with
+  | nil => rfl
+  | cons s l ih =>
+    have hs : learn ρ ηs ηr w0 w0 s.1 s.2 = w0 := by
+      unfold learn
+      simp only [sub_self, mul_zero, add_zero]
+      split_ifs with hα hsafe
+      · rfl
+      · exact absurd (h s (by simp) hsafe) hα
+      · simp
+    simp only [List.foldl_cons, hs]
+    exact ih fun t ht => h t (by simp [ht])
+
+/-- The drive an odour gives the MBON through the plastic synapses `S`. -/
+def drive {ι : Type} (S : Finset ι) (w x : ι → ℝ) : ℝ := ∑ j ∈ S, w j * x j
+
+/-- How much training can take from an odour's drive: at most the drive it had through the
+Kenyon cells harmless traffic lit (`seen`). Whatever reached the MBON through the other cells
+reaches it still. -/
+theorem drive_loss_le_overlap {ι : Type} [DecidableEq ι] (S seen : Finset ι) (w w0 x : ι → ℝ)
+    (hx : ∀ j, 0 ≤ x j) (hw : ∀ j, 0 < w j ∧ w j ≤ w0 j) (hun : ∀ j ∉ seen, w j = w0 j) :
+    drive S w0 x - drive S w x ≤ drive (S ∩ seen) w0 x := by
+  unfold drive
+  rw [← Finset.sum_sub_distrib, ← Finset.sum_filter_add_sum_filter_not S (· ∈ seen)]
+  have h1 : ∑ j ∈ S.filter (· ∉ seen), (w0 j * x j - w j * x j) = 0 :=
+    Finset.sum_eq_zero fun j hj => by
+      rw [hun j (Finset.mem_filter.mp hj).2]; ring
+  have h2 : ∑ j ∈ S.filter (· ∈ seen), (w0 j * x j - w j * x j) ≤
+      ∑ j ∈ S.filter (· ∈ seen), w0 j * x j :=
+    Finset.sum_le_sum fun j _ => by nlinarith [hw j, hx j]
+  rw [Finset.filter_mem_eq_inter] at h2 ⊢
+  linarith
+
+/-- So an odour none of whose Kenyon cells harmless traffic lit drives the trained fly exactly as
+hard as the untrained one: no amount of training on other traffic blinds the fly to it. -/
+theorem novel_drive_untouched {ι : Type} (S seen : Finset ι) (w w0 x : ι → ℝ)
+    (hun : ∀ j ∉ seen, w j = w0 j) (hnew : ∀ j ∈ S, j ∉ seen) :
+    drive S w x = drive S w0 x :=
+  Finset.sum_congr rfl fun j hj => by rw [hun j (hnew j hj)]
+
 /-! ## The coordinator (`Coordinator::incident` in `cluster.rs`)
 
 One second of the cluster, abstracted from the spikes: which of the five flies fire now (fly 4
@@ -304,5 +356,30 @@ theorem lead_has_strong_specialist {x : Second α} (h : confirmedOrStrong x) (hn
   · exact absurd h hn
   · simp only [Finset.mem_filter] at hf
     exact ⟨f, hf.1, hf.2.1, hf.2.2⟩
+
+/-- The fan-out vote (ISSUES O18): a fly fires only if its suspects have fan-out behind them, and
+only what it fired with is remembered. Any such gate leaves fewer flies firing and fewer names
+remembered. -/
+def Second.le (x' x : Second α) : Prop :=
+  (∀ f, x'.now f → x.now f) ∧ x'.suspects = x.suspects ∧ (∀ f, x'.recent f ⊆ x.recent f) ∧
+    x'.strong = x.strong
+
+lemma quorum_mono {x' x : Second α} (h : x'.le x) {src src' : Finset (Fin 5)} (hs : src' ⊆ src)
+    (hq : quorum x' src') : quorum x src := by
+  obtain ⟨hn, hsus, hrec, -⟩ := h
+  obtain ⟨f, hf, hnow, e, he, hv⟩ := hq
+  refine ⟨f, hs hf, hn f hnow, e, hsus ▸ he, le_trans hv ?_⟩
+  exact Finset.card_le_card fun g hg => by
+    simp only [Finset.mem_filter, Finset.mem_univ, true_and] at hg ⊢; exact hrec g hg
+
+/-- So the fan-out vote can only remove incidents and leads, never raise one. -/
+theorem gate_only_removes {x' x : Second α} (h : x'.le x) (ha : confirmedOrStrong x') :
+    confirmedOrStrong x := by
+  rcases ha with ha | ha
+  · exact Or.inl (quorum_mono h subset_rfl ha)
+  · refine Or.inr (quorum_mono h ?_ ha)
+    intro f hf
+    simp only [Finset.mem_filter] at hf ⊢
+    exact ⟨hf.1, h.1 f hf.2.1, h.2.2.2 ▸ hf.2.2⟩
 
 end FlySOC

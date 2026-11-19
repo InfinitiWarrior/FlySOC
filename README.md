@@ -53,8 +53,10 @@ data set, are in [Real data](#real-data-lanl).
   included, still reaches 0.84 of the kill chain on unseen backgrounds (O13; measured before Phase 9): blue's next round.
 - Phase 5, in progress: Lean 4 proofs, checked with no `sorry`, of the encoding, the learning rule
   and the coordinator: weights stay in $(0, w^0]$ over any training run, and no single fly can
-  raise an incident or a lead ([Lean 4](#lean-4-what-is-proved-phase-5)). Still to come:
-  properties of a trained circuit.
+  raise an incident or a lead ([Lean 4](#lean-4-what-is-proved-phase-5)). About every trained
+  fly: training can only quiet an odour through Kenyon cells that harmless traffic also lit, so an
+  odour made of cells it never lit drives the trained fly exactly as hard as the untrained one.
+  Still open: the spiking network between those Kenyon cells and the alarm.
 
 - Real data: the flies run on the LANL enterprise data (17,684 computers), a 4-hour slice in about
   2 minutes. Since Phase 9's first step the identity fly smells how many accounts a source fails
@@ -132,7 +134,7 @@ cargo run --release -- bench   # 1 s of whole-brain fly time, headless
 cargo run --release -- detect --train data/telemetry/train.jsonl data/telemetry/baseline.jsonl data/telemetry/holdout.jsonl
 cargo run --release -- cluster data/telemetry/cluster_train.jsonl data/telemetry/cluster_holdout.jsonl
 cargo run --release -- watch data/telemetry/cluster_train.jsonl data/telemetry/cluster_holdout.jsonl
-cargo test --release            # 33 tests, below
+cargo test --release            # 34 tests, below
 ```
 
 `cargo test` checks the encoding (stable odours, history counts, the overlapping count code pinned
@@ -444,16 +446,23 @@ Everything below is checked by Lean 4.35.0 with Mathlib (`proofs/FlySOC.lean`, n
 | `floor_strictAnti`, `sleep_antitone`, `sleep_unseen`, `floor_at_rare` | commoner means a strictly lower floor and never more weight back; never seen restores $w^0_j$; $f_j = r$ gives the floor $w^0_j / e$ |
 | `attack_seconds_ignored`, `spikes_count_once` | attack seconds change nothing sleep sees; 1 spike or 50 in a second are one sighting |
 | `days_and_nights_bounded` | any number of days of learning, each followed by a night's sleep, keeps $0 < w_j \le w^0_j$ |
+| `unseen_stays` | a synapse whose Kenyon cell never fired in a harmless second keeps exactly $w^0_j$, whatever the attacks and however long the run |
+| `drive_loss_le_overlap`, `novel_drive_untouched` | for any trained fly, an odour's MBON drive $\sum_j w_j x_j$ loses at most what reached the MBON through cells harmless traffic lit; an odour of none of them drives it exactly as hard as before training |
 | `incident_is_alert` | every incident (rule D) is also a rule E alert: leads only ever add |
 | `alert_corroborated` | no fly can raise an incident or a lead alone: two different flies named the entity |
 | `teamOrSingle_uncorroborated` | rule B lacks that property (a counterexample) |
 | `lead_has_strong_specialist` | a lead that is not an incident has a specialist at $\kappa = 1.5$ times its threshold |
+| `gate_only_removes` | the fan-out vote (O18) only removes incidents and leads: fewer flies firing and fewer names remembered never raise one |
 
 What the proofs do **not** cover: the weights are real numbers, while `MushroomBody::learn` and
 `sleep` run in `f32` (rounding is not modelled; a weight depressed by thousands of safe spikes can
 underflow to exactly 0 in `f32` where Lean proves $w_j > 0$, so the Rust tests check $w_j \ge 0$); the coordinator is modelled one second at a time, from which
 flies fire and whom they name, not from the spiking network that decides that; and nothing yet is
-proved about a *trained* circuit's behaviour on particular inputs.
+proved about the spiking network between the Kenyon cells and the alarm: the trained-fly theorems
+bound the MBON's synaptic drive, not its spikes, and how many of an attack's Kenyon cells harmless
+traffic lit (which decides how much the guarantee covers) is not measured yet. The Rust test
+`a_cell_harmless_traffic_never_lit_keeps_its_weight_exactly` checks `unseen_stays` holds bit for
+bit in `f32`.
 
 ```sh
 cd proofs && lake exe cache get && lake build   # ~7 GB of Mathlib build cache in proofs/.lake
@@ -693,6 +702,58 @@ theorem days_and_nights_bounded {ρ ηs ηr rare w0 : ℝ}
     have hn := sleep_bounded hrare hw0 hday d
     exact ih _ ⟨hn.2.1, hn.2.2⟩
 
+/-! ## What a trained fly can and cannot unlearn (the readout, `MushroomBody` on the GPU)
+
+An MBON is driven by its Kenyon cells through the plastic synapses: a second's drive is
+`Σ w_j x_j` over the synapses, `x_j ≥ 0` the Kenyon cell's spikes. The theorems below hold for
+every training run, so for every trained fly: training can only quiet an odour through the
+Kenyon cells that harmless traffic also lit. -/
+
+/-- A synapse whose Kenyon cell never fired in a safe second keeps its resting weight exactly,
+however long the run and whatever the attacks: recovery and attack learning both pull to `w0`. -/
+theorem unseen_stays (ρ ηs ηr w0 : ℝ) (seconds : List (ℕ × Bool))
+    (h : ∀ s ∈ seconds, s.2 = true → s.1 = 0) :
+    seconds.foldl (fun w s => learn ρ ηs ηr w0 w s.1 s.2) w0 = w0 := by
+  induction seconds with
+  | nil => rfl
+  | cons s l ih =>
+    have hs : learn ρ ηs ηr w0 w0 s.1 s.2 = w0 := by
+      unfold learn
+      simp only [sub_self, mul_zero, add_zero]
+      split_ifs with hα hsafe
+      · rfl
+      · exact absurd (h s (by simp) hsafe) hα
+      · simp
+    simp only [List.foldl_cons, hs]
+    exact ih fun t ht => h t (by simp [ht])
+
+/-- The drive an odour gives the MBON through the plastic synapses `S`. -/
+def drive {ι : Type} (S : Finset ι) (w x : ι → ℝ) : ℝ := ∑ j ∈ S, w j * x j
+
+/-- How much training can take from an odour's drive: at most the drive it had through the
+Kenyon cells harmless traffic lit (`seen`). Whatever reached the MBON through the other cells
+reaches it still. -/
+theorem drive_loss_le_overlap {ι : Type} [DecidableEq ι] (S seen : Finset ι) (w w0 x : ι → ℝ)
+    (hx : ∀ j, 0 ≤ x j) (hw : ∀ j, 0 < w j ∧ w j ≤ w0 j) (hun : ∀ j ∉ seen, w j = w0 j) :
+    drive S w0 x - drive S w x ≤ drive (S ∩ seen) w0 x := by
+  unfold drive
+  rw [← Finset.sum_sub_distrib, ← Finset.sum_filter_add_sum_filter_not S (· ∈ seen)]
+  have h1 : ∑ j ∈ S.filter (· ∉ seen), (w0 j * x j - w j * x j) = 0 :=
+    Finset.sum_eq_zero fun j hj => by
+      rw [hun j (Finset.mem_filter.mp hj).2]; ring
+  have h2 : ∑ j ∈ S.filter (· ∈ seen), (w0 j * x j - w j * x j) ≤
+      ∑ j ∈ S.filter (· ∈ seen), w0 j * x j :=
+    Finset.sum_le_sum fun j _ => by nlinarith [hw j, hx j]
+  rw [Finset.filter_mem_eq_inter] at h2 ⊢
+  linarith
+
+/-- So an odour none of whose Kenyon cells harmless traffic lit drives the trained fly exactly as
+hard as the untrained one: no amount of training on other traffic blinds the fly to it. -/
+theorem novel_drive_untouched {ι : Type} (S seen : Finset ι) (w w0 x : ι → ℝ)
+    (hun : ∀ j ∉ seen, w j = w0 j) (hnew : ∀ j ∈ S, j ∉ seen) :
+    drive S w x = drive S w0 x :=
+  Finset.sum_congr rfl fun j hj => by rw [hun j (hnew j hj)]
+
 /-! ## The coordinator (`Coordinator::incident` in `cluster.rs`)
 
 One second of the cluster, abstracted from the spikes: which of the five flies fire now (fly 4
@@ -766,6 +827,31 @@ theorem lead_has_strong_specialist {x : Second α} (h : confirmedOrStrong x) (hn
   · exact absurd h hn
   · simp only [Finset.mem_filter] at hf
     exact ⟨f, hf.1, hf.2.1, hf.2.2⟩
+
+/-- The fan-out vote (ISSUES O18): a fly fires only if its suspects have fan-out behind them, and
+only what it fired with is remembered. Any such gate leaves fewer flies firing and fewer names
+remembered. -/
+def Second.le (x' x : Second α) : Prop :=
+  (∀ f, x'.now f → x.now f) ∧ x'.suspects = x.suspects ∧ (∀ f, x'.recent f ⊆ x.recent f) ∧
+    x'.strong = x.strong
+
+lemma quorum_mono {x' x : Second α} (h : x'.le x) {src src' : Finset (Fin 5)} (hs : src' ⊆ src)
+    (hq : quorum x' src') : quorum x src := by
+  obtain ⟨hn, hsus, hrec, -⟩ := h
+  obtain ⟨f, hf, hnow, e, he, hv⟩ := hq
+  refine ⟨f, hs hf, hn f hnow, e, hsus ▸ he, le_trans hv ?_⟩
+  exact Finset.card_le_card fun g hg => by
+    simp only [Finset.mem_filter, Finset.mem_univ, true_and] at hg ⊢; exact hrec g hg
+
+/-- So the fan-out vote can only remove incidents and leads, never raise one. -/
+theorem gate_only_removes {x' x : Second α} (h : x'.le x) (ha : confirmedOrStrong x') :
+    confirmedOrStrong x := by
+  rcases ha with ha | ha
+  · exact Or.inl (quorum_mono h subset_rfl ha)
+  · refine Or.inr (quorum_mono h ?_ ha)
+    intro f hf
+    simp only [Finset.mem_filter] at hf ⊢
+    exact ⟨hf.1, h.1 f hf.2.1, h.2.2.2 ▸ hf.2.2⟩
 
 end FlySOC
 ```
