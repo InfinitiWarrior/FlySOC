@@ -55,7 +55,7 @@ def main(pairs):
         total = sum(queue.values())
         print(f"== {name}: {total} alerts in the queue, {queue['intrusion']} about an intrusion "
               f"(precision {queue['intrusion'] / max(total, 1):.0%}); intrusions caught {len(caught)}/{intrusions}, "
-              f"median first alert +{statistics.median(delays):.0f} s")
+              f"median first alert " + (f"+{statistics.median(delays):.0f} s" if delays else "none"))
         for k, v in queue.most_common():
             if k != "intrusion":
                 print(f"   {k:18} {v}")

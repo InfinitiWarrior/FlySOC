@@ -71,6 +71,13 @@ fn history_only() -> Vec<String> {
 fn fine() -> bool {
     std::env::var("FLYSOC_FINE").map_or(true, |v| v != "0")
 }
+/// FLYSOC_ROSTER=identity,..: only these flies may fire (O21), for telemetry the others cannot see
+/// an attack in. Unset: all of them.
+fn roster() -> Vec<bool> {
+    let v = std::env::var("FLYSOC_ROSTER").unwrap_or_default();
+    let names: Vec<&str> = v.split(',').filter(|r| !r.is_empty()).collect();
+    FLIES.iter().map(|(n, _)| names.is_empty() || names.contains(n)).collect()
+}
 /// FLYSOC_SLEEP=1: after training, the flies sleep (Phase 10, `MushroomBody::sleep`).
 fn sleeps() -> bool {
     std::env::var("FLYSOC_SLEEP").is_ok_and(|v| v == "1")
@@ -238,6 +245,7 @@ pub struct Coordinator {
     ema: Vec<f64>,
     fired: Vec<Option<(usize, Vec<String>)>>, // per fly: last second it fired, and its suspects then
     cases: Vec<(std::collections::HashSet<String>, usize)>, // per case: entities named in it, last alert
+    roster: Vec<bool>, // per fly: may it fire on this telemetry (FLYSOC_ROSTER, O21)
 }
 
 /// A case stays open this long after its last alert. Chosen on the eval set: 300 s split 9 of 10
@@ -246,7 +254,7 @@ const CASE_S: usize = 600;
 
 impl Coordinator {
     pub fn new(thresholds: &[f64]) -> Self {
-        Self { thresholds: thresholds.to_vec(), ema: vec![0.0; thresholds.len()], fired: vec![None; thresholds.len()], cases: Vec::new() }
+        Self { thresholds: thresholds.to_vec(), ema: vec![0.0; thresholds.len()], fired: vec![None; thresholds.len()], cases: Vec::new(), roster: roster() }
     }
 
     /// Fly `f`'s evidence now, in multiples of its threshold.
@@ -261,7 +269,7 @@ impl Coordinator {
         let mut now = vec![false; mbon.len()];
         for f in 0..mbon.len() {
             self.ema[f] += (mbon[f] as f64 - self.ema[f]) / EVIDENCE_S;
-            now[f] = s >= detect::WARMUP_S && self.ema[f] > self.thresholds[f] && fan[f];
+            now[f] = s >= detect::WARMUP_S && self.ema[f] > self.thresholds[f] && fan[f] && self.roster.get(f).copied().unwrap_or(true);
             if now[f] {
                 self.fired[f] = Some((s, suspects[f].clone()));
             }
@@ -269,11 +277,19 @@ impl Coordinator {
         now
     }
 
+    /// The only fly on the roster, if there is just one.
+    fn solo(&self) -> Option<usize> {
+        let mut on = (0..self.roster.len()).filter(|&f| self.roster[f]);
+        on.next().filter(|_| on.next().is_none() && self.roster.len() > 1)
+    }
+
     /// The alert of second `s`, if any: ("incident" by RULE, else "lead" by LEAD), confidence,
     /// entity and case. Call after `second`.
     pub fn alert(&mut self, s: usize, now: &[bool], suspects: &[Vec<String>]) -> Option<(&'static str, f32, String, usize)> {
         let tier = |kind: &'static str, rule| self.incident(s, now, suspects, rule).map(|(c, e)| (kind, c, e));
-        let (kind, c, e) = tier("incident", RULE).or_else(|| tier("lead", LEAD))?;
+        // a roster of one has nobody to agree with: its fly raises leads alone (O21)
+        let solo = || self.solo().filter(|&f| now[f]).and_then(|f| suspects[f].first()).map(|e| ("lead", 1.0 / now.len() as f32, e.clone()));
+        let (kind, c, e) = tier("incident", RULE).or_else(|| tier("lead", LEAD)).or_else(solo)?;
         Some((kind, c, e.clone(), self.case(s, &named(now, suspects, &e))))
     }
 
@@ -896,6 +912,28 @@ mod tests {
         assert!(!e.involves("C4") && !e.involves("C"), "nothing else, and no prefixes");
         let p: Event = serde_json::from_str(r#"{"ts":1,"kind":"proc","host":"C5","process":"P1"}"#).unwrap();
         assert!(p.involves("C5") && !p.involves("P1"), "a process event by its host, not its process name");
+    }
+
+    #[test]
+    fn a_roster_of_one_raises_leads_alone_and_silences_the_rest() {
+        let mut c = Coordinator::new(&[1.0; 5]);
+        c.roster = vec![false, true, false, false, false];
+        let sus = vec![vec!["C17693".to_string()]; 5];
+        let (mut now, s) = (vec![], detect::WARMUP_S + 100);
+        for t in 0..=s {
+            now = c.second(t, &[100; 5], &sus, &[true; 5]);
+        }
+        assert_eq!(now, [false, true, false, false, false], "only the identity fly may fire");
+        let (kind, _, entity, _) = c.alert(s, &now, &sus).expect("alone, it still raises an alert");
+        assert_eq!((kind, entity.as_str()), ("lead", "C17693"), "uncorroborated: a lead, never an incident");
+        // with everyone on the roster one fly alone still raises nothing (Lean `alert_corroborated`)
+        let mut all = Coordinator::new(&[1.0; 5]);
+        all.roster = vec![true; 5];
+        let one = [false, true, false, false, false];
+        for t in 0..=s {
+            all.second(t, &[0, 100, 0, 0, 0], &sus, &[true; 5]);
+        }
+        assert!(all.alert(s, &one, &sus).is_none());
     }
 
     #[test]

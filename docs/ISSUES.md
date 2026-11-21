@@ -355,6 +355,51 @@ episodes to its 33; both name 2 of 6 incidents. Still missing: the evening incid
 **Lesson**: two plausible causes (labels, data volume) were cheap to test and wrong; the per-second
 trace against the competing detector's own score found the real one in minutes.
 
+### O21. On LANL the coordinator's queue was empty or useless while single flies looked good (P9, partly fixed)
+**Symptom**: O20 reported the identity fly at 73% on LANL final, scored per fly. The coordinator's
+JSON queue, what an analyst reads, had never been scored on LANL: 0 alerts on eval, and on final 133
+alerts with 1 about the red team (1%), 1 of 6 incidents.
+**Cause**: rules D and E need two flies to name an entity. This red team shows only in logons, so
+only the identity fly sees it; the alerts that did pass were the endpoint and single flies agreeing
+about busy computers.
+**Fix**: `FLYSOC_ROSTER=identity` (`roster`, `Coordinator::solo`, cluster.rs): only listed flies
+fire, and a roster of one raises leads alone, never incidents. Unset, output is byte-identical
+(`cluster_final_31`). `tools/attribution.py` no longer crashes on a queue with no catch.
+**Results**: eval (chosen on) 17 alerts, 15 about the attack (88%), 2 of 3 incidents. Final, once:
+36 alerts, 20 about the attack (56%), 2 of 6, first at +5503 s.
+**Rejected**: calibrating on 16 benign hours over four days (`calib_multi.jsonl`): on eval 12
+identity episodes, 11 about the attack, +462 s (was 17, 15, +135 s), endpoint 5 false (3).
+**Where this stands**: open. 4 of 6 final incidents are still unnamed and 44% of the queue is false.
+The roster is chosen per data source by hand; nothing picks it automatically.
+**Where**: cluster.rs; runs in `data/runs/o21/`.
+**Lesson**: score the output the user actually receives. A per-component metric hid a pipeline
+that produced almost nothing useful.
+
+### O22. A longer memory of failed logons did not catch the slow LANL incident (P9, rejected, open)
+**Symptom**: with the O21 roster, eval incident `intrusion@1888` is never named: 28 logons over
+6004 s, the longest gap 1374 s, too slow for a 15-minute count to add up.
+**Evidence for trying it**: offline, distinct failed users per source over 60 minutes, against the
+highest value any source reached on `calib_wd` (6), names @1888 at +3292 s and @475 at +0 s, misses
+@12982, and no benign source crosses the line. 15 minutes misses @1888. This is a plain count on
+three incidents with a threshold from one calibration file, not a fly.
+**Tried on eval, identity fly, queue score** (baseline: 17 alerts, 88%, 2 of 3, median +12 s):
+
+| memory of failed users | alerts | about the attack | incidents | median first alert | fly threshold (eval_1) | false seconds (eval_1) |
+|---|---|---|---|---|---|---|
+| 15 min (current) | 17 | 88% | 2 of 3 | +12 s | 1.3 | 0 |
+| 60 min instead | 39 | 72% | 2 of 3 | +1870 s | 2.4 | 64 |
+| 15 and 60 min, three codes | 35 | 69% | 2 of 3 | +757 s | 5.0 | 79 |
+
+Both variants name @1888 and lose @12982, which the current fly names at +24 s.
+**Cause**: not established. The calibrated threshold rose with each variant, and false seconds
+appeared, which fits a longer count making benign traffic look more varied to the fly. No run
+isolated that.
+**Fix**: none. Both variants were removed; `src/detect.rs` is back to its committed state and the
+LANL `eval_1` queue is byte-identical to O21's. The final sets were not run.
+**Where**: runs in `data/runs/o22/`.
+**Lesson**: a count that separates cleanly offline does not necessarily help once it is an input to
+the fly. Test it through the queue before believing it.
+
 ## Solved: measurement and alerts (since Phase 8)
 
 ### O18. Flies voted on alarms with nothing behind them (P11)

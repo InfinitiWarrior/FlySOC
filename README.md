@@ -69,7 +69,10 @@ data set, are in [Real data](#real-data-lanl).
   slices (days 12-14) 19 of the identity fly's 26 alarm episodes are about the red team (73%,
   the same precision as a plain count of its input, which finds 33 of 45); before O20 4 of 10,
   before Phase 9 6 of 41. The other flies cannot see this red team and raise 77 false episodes
-  in 12 hours (O16, O20).
+  in 12 hours (O16, O20). **What an analyst would see is worse than that per-fly number:** the
+  default coordinator's queue on those slices held 133 alerts, 1 about the red team (1%), because
+  it needs two flies to agree and only one can see this attack. With `FLYSOC_ROSTER=identity` it
+  holds **36 alerts, 20 about the red team (56%), naming 2 of 6 incidents** (O21).
 - Phase 8, done: baselines on the same final data, scored the same way. On synthetic data the flies
   win: the single fly names all 10 intrusions with no false episode (+78 s), the network fly 9 of
   10 at +36 s; the best baseline needs +240 s. On LANL a plain count of the identity fly's own input
@@ -143,7 +146,7 @@ cargo run --release -- detect --train data/telemetry/train.jsonl data/telemetry/
 cargo run --release -- cluster data/telemetry/cluster_train.jsonl data/telemetry/cluster_holdout.jsonl
 cargo run --release -- watch data/telemetry/cluster_train.jsonl data/telemetry/cluster_holdout.jsonl
 cargo run --release -- cover data/telemetry/cluster_train.jsonl data/telemetry/cluster_holdout.jsonl > cover.tsv
-cargo test --release            # 35 tests, below
+cargo test --release            # 36 tests, below
 ```
 
 `cargo test` checks the encoding (stable odours, history counts, the overlapping count code pinned
@@ -199,6 +202,8 @@ of giving each all events, each measured against its own 30-minute background (O
 `FLYSOC_HISTORY_ONLY=<roles>` sets which roles smell only history counts (default `identity`;
 empty for none; Phase 9).
 `FLYSOC_VERIFY=1` checks each new alert's suspect by a counterfactual replay ([Phase 11](#phase-11-explaining-alerts)).
+`FLYSOC_ROSTER=identity,...` lets only the listed flies fire; a roster of one raises leads alone (O21). Use `identity` on LANL.
+
 `FLYSOC_CALIB=<file>` calibrates thresholds on another benign file (default
 `data/telemetry/cluster_calib.jsonl`; LANL uses its own weekday slice).
 
@@ -459,7 +464,7 @@ Everything below is checked by Lean 4.35.0 with Mathlib (`proofs/FlySOC.lean`, n
 | `unseen_stays` | a synapse whose Kenyon cell never fired in a harmless second keeps exactly $w^0_j$, whatever the attacks and however long the run |
 | `drive_loss_le_overlap`, `novel_drive_untouched` | for any trained fly, an odour's MBON drive $\sum_j w_j x_j$ loses at most what reached the MBON through cells harmless traffic lit; an odour of none of them drives it exactly as hard as before training |
 | `incident_is_alert` | every incident (rule D) is also a rule E alert: leads only ever add |
-| `alert_corroborated` | no fly can raise an incident or a lead alone: two different flies named the entity |
+| `alert_corroborated` | under rules D and E no fly can raise an incident or a lead alone: two different flies named the entity. `FLYSOC_ROSTER` with one fly deliberately bypasses this for leads (O21) |
 | `teamOrSingle_uncorroborated` | rule B lacks that property (a counterexample) |
 | `lead_has_strong_specialist` | a lead that is not an incident has a specialist at $\kappa = 1.5$ times its threshold |
 | `gate_only_removes` | the fan-out vote (O18) only removes incidents and leads: fewer flies firing and fewer names remembered never raise one |
@@ -1207,7 +1212,7 @@ seconds where `zcat` takes minutes per pass.
 
 ```sh
 python3 tools/lanl.py <start_s> <hours> <out.jsonl>   # e.g. day 8, 09:00: $((8*86400 + 9*3600)) 4
-FLYSOC_CALIB=data/telemetry/lanl/calib_wd.jsonl FLYSOC_FLY_LOG=fly.tsv \
+FLYSOC_ROSTER=identity FLYSOC_CALIB=data/telemetry/lanl/calib_wd.jsonl FLYSOC_FLY_LOG=fly.tsv \
   ./target/release/flysoc cluster data/telemetry/lanl/train.jsonl data/telemetry/lanl/eval_1.jsonl
 python3 tools/lanl_score.py data/telemetry/lanl/eval_1.jsonl fly.tsv
 ```
@@ -1400,6 +1405,21 @@ disjoint code above, neighbouring counts still overlap. `FLYSOC_FINE=0` turns it
 The synthetic eval set got a little noisier and the final set much quieter: with 10 intrusions per
 set, that spread is the noise. On LANL the fly now matches the count's precision and finds 19
 attack episodes to its 33; both name 2 of 6 incidents, the count sooner.
+
+**The queue on LANL (O21).** The numbers above score each fly alone. The coordinator needs two flies
+to name an entity, and on LANL only the identity fly can see the red team, so its queue was empty on
+eval and 1% precise on final. `FLYSOC_ROSTER=identity` lets only the listed flies fire; a roster of
+one raises *leads* alone, never incidents, because nothing corroborates them. Unset, output is
+byte-identical to before (checked on `cluster_final_31`).
+
+| LANL queue (`tools/attribution.py`) | all flies | roster: identity |
+|---|---|---|
+| *chosen on* eval_1 + eval_2 | 0 alerts, 0 of 3 incidents | 17 alerts, **88%**, 2 of 3 |
+| final_1-3 (once) | 133 alerts, **1%**, 1 of 6 | 36 alerts, **56%**, 2 of 6, first at +5503 s |
+
+Calibrating on 16 benign hours over four days instead of one afternoon was tried on eval and
+rejected: 11 attack episodes instead of 15, +462 s instead of +135 s, endpoint false episodes 5
+instead of 3.
 
 **Still to do in Phase 9:** integrating over time with circuits from the connectome, judged against
 the failed-users count on LANL.
