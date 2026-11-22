@@ -400,6 +400,29 @@ LANL `eval_1` queue is byte-identical to O21's. The final sets were not run.
 **Lesson**: a count that separates cleanly offline does not necessarily help once it is an input to
 the fly. Test it through the queue before believing it.
 
+### O23. A plain 60-minute failed-logon count beside the fly passed eval and failed final (P9, rejected, open)
+**Symptom**: after O22, the count was tried outside the fly: a lead whenever a new failed user took
+a source above the highest count any source reached on `calib_wd` (6 users in 60 minutes).
+**Results**, identity fly plus the count, queue score:
+
+| | alerts | about the attack | false | incidents | median first alert |
+|---|---|---|---|---|---|
+| eval, fly alone | 17 | 15 (88%) | 2 | 2 of 3 | +12 s |
+| eval, fly + count | 28 | 26 (93%) | 2 | **3 of 3** | +24 s |
+| final, fly alone | 36 | 20 (56%) | 16 | 2 of 6 | +5503 s |
+| final, fly + count (once) | 49 | 27 (55%) | 22 | **2 of 6** | +5147 s |
+
+On final the count added 13 queue entries, 7 about the attack and 6 false, and named no new
+incident. Its false leads include sources C6010, C1089 and C1139.
+**Cause**: not established. The 3-of-3 on eval rested on one count alert for `intrusion@1888`, and
+the 30- and 120-minute windows both missed that incident, so the eval gain was fragile. The final
+incidents were deliberately not inspected, to keep them usable as a test.
+**Fix**: none. `FLYSOC_SLOW_COUNT` was removed. Unset, it had left `eval_1` byte-identical to O21.
+**Where**: runs in `data/runs/o22/slow_eval_*` and `data/runs/o23/`.
+**Lesson**: three eval incidents can make a rule look perfect by one alert. Final has now been used
+for O20, O21 and O23, so the LANL final numbers carry some selection across attempts; fresh red-team
+days should judge the next candidate.
+
 ## Solved: measurement and alerts (since Phase 8)
 
 ### O18. Flies voted on alarms with nothing behind them (P11)
