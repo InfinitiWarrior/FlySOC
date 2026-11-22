@@ -423,6 +423,66 @@ incidents were deliberately not inspected, to keep them usable as a test.
 for O20, O21 and O23, so the LANL final numbers carry some selection across attempts; fresh red-team
 days should judge the next candidate.
 
+### O24. On fresh LANL days the identity fly names nothing (P9, open)
+**Symptom**: on four days it had never been scored on (`eval_3`-`eval_6`, days 15, 20, 21, 22, the
+busiest red-team 4 hours of each), the O21 setup (`FLYSOC_ROSTER=identity`, trained on day 5) queues
+**12 alerts, 0 about the red team, 0 of 6 incidents**. The 56% of O21 does not generalise.
+**Cause, part known**: 3 of the 6 incidents are a single logon, and in 4 of the 6 (those 3 and a
+3-logon incident) every user-source pair had been seen before. A fan-out count cannot see one
+logon. Why the fly also misses the two 11-logon incidents is not established. A first-seen check over all
+logons since day 1 (`data/runs/o24/edges.py`, output `edges_eval.txt`) finds:
+
+| signal, 16 h of eval | red logons flagged (of 28) | benign logons flagged | incidents touched |
+|---|---|---|---|
+| new source-destination pair | 5 | 2,244 | 3 of 6 |
+| new user-source pair | 5 | 1,104 | 2 of 6 |
+| user, source and destination pairs all new | 4 | 52 | 2 of 6 |
+
+The strictest signal would be about 7% precise per flagged logon and still miss 4 of 6 incidents.
+Those 4 have no logon with all three pairs new. History here includes the red team's own earlier
+logons, as it would in a live system.
+**Fix**: none yet. No code changed.
+**New sets**: `eval_3`-`eval_6` for choosing. `final_4`-`final_7` (days 26-29, busiest 4 hours each)
+were cut and sealed while this entry's scan ran, which stopped before day 23. O25 then used them.
+**Where**: runs in `data/runs/o24/`.
+**Lesson**: a slice chosen for having an attack says little about the next attack. Before quoting
+accuracy on real data, test on days that played no part in any earlier decision.
+
+### O25. A plain logon-relationship detector finds 8 of 10 incidents, at 15% precision (P9, partly fixed)
+**Symptom**: O24, the identity fly names 2 of 9 dev incidents and 2 of 10 on the sealed days.
+**What the literature suggested**: [Hopper](https://arxiv.org/abs/2105.13442) (Ho et al., USENIX
+Security 2021) detects lateral movement from credential switches. A
+[re-evaluation of graph detectors](https://arxiv.org/abs/2607.29390) reports about 0.98 AUC and 0.02
+average precision for Euler on LANL, so everything here is judged by queue precision, never AUC.
+**Tried on dev** (days 8, 15, 20, 21, 22; 9 incidents): credential switching alone found **0 of 9**
+and was dropped. New-relationship bursts found 4 of 9, failed users 4 of 9. Requiring two signals on
+one source within an hour gave 4 alerts, 1 false.
+**Method**: `tools/lanl_relations.py`, no fly involved. Per source over one hour: logons with all
+three pairs new, failed users, new destinations. Two above their lines put the source on a watchlist
+until an analyst clears it, and each later successful logon from it is a lead.
+**The leak, caught before reporting**: lines first came from days 16-19, later than the day 8 alert
+that fills the watchlist. That gave 75% on the sealed days (4 alerts, 1 false, 8 of 10). A live
+system cannot know those lines. With lines from red-free days 3-4 (1, 2, 10 instead of 1, 5, 12),
+five busy computers outside the red-team labels join the watchlist and stay:
+
+| one queue entry per entity-hour | alerts | about the attack | false | precision | incidents |
+|---|---|---|---|---|---|
+| dev, identity fly | 12 | 1 | 11 | 8% | 2 of 9 |
+| dev, relations | 31 | 4 | 27 | 13% | 7 of 9 |
+| **sealed days 26-29, identity fly** | 19 | 2 | 17 | 11% | **2 of 10** |
+| **sealed days 26-29, relations** | 20 | 3 | 17 | **15%** | **8 of 10** |
+
+**Where this stands**: recall improved four-fold at the same number of false alerts. Precision is
+still low. On the sealed days every alert comes from the watchlist: all 8 caught incidents involve
+C17693, listed on day 8, and the 2 missed are C19932 alone. The result therefore rests on the red
+team reusing one computer. A red team that changes machines would not be caught this way.
+The sealed days were run twice, once with the leaking lines and once with the fixed ones. The
+change was made because of the leak and lowered the score. They are no longer unseen.
+**Where**: `tools/lanl_relations.py` (`check` self-test); runs in `data/runs/o25/`. Not in the Rust
+engine or the flies.
+**Lesson**: check where every threshold came from in time. A threshold from the future turned 15%
+into 75%.
+
 ## Solved: measurement and alerts (since Phase 8)
 
 ### O18. Flies voted on alarms with nothing behind them (P11)

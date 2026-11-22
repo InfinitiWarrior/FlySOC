@@ -72,7 +72,12 @@ data set, are in [Real data](#real-data-lanl).
   in 12 hours (O16, O20). **What an analyst would see is worse than that per-fly number:** the
   default coordinator's queue on those slices held 133 alerts, 1 about the red team (1%), because
   it needs two flies to agree and only one can see this attack. With `FLYSOC_ROSTER=identity` it
-  holds **36 alerts, 20 about the red team (56%), naming 2 of 6 incidents** (O21).
+  holds **36 alerts, 20 about the red team (56%), naming 2 of 6 incidents** (O21). **That does not
+  generalise:** on four fresh days (15, 20, 21, 22) the same setup queues 12 alerts, none about the
+  red team, and names **0 of 6 incidents** (O24). A plain logon-relationship detector beside the
+  flies names **8 of 10** incidents on days 26-29, where the identity fly names 2 of 10, with the
+  same 17 false alerts. Its precision is **15%**, and it relies on the red team reusing one
+  computer (O25).
 - Phase 8, done: baselines on the same final data, scored the same way. On synthetic data the flies
   win: the single fly names all 10 intrusions with no false episode (+78 s), the network fly 9 of
   10 at +36 s; the best baseline needs +240 s. On LANL a plain count of the identity fly's own input
@@ -1420,6 +1425,36 @@ byte-identical to before (checked on `cluster_final_31`).
 Calibrating on 16 benign hours over four days instead of one afternoon was tried on eval and
 rejected: 11 attack episodes instead of 15, +462 s instead of +135 s, endpoint false episodes 5
 instead of 3.
+
+**Fresh days (O24).** On `eval_3`-`eval_6` (days 15, 20, 21, 22, never used before) the identity
+roster queues 12 alerts, 0 about the red team, 0 of 6 incidents. Three of those incidents are one
+logon, which a fan-out count cannot see, and in four every user-source pair had been seen before.
+Flagging logons whose user, source and destination pairs are all new catches 2 of 6 and is about
+7% precise, so first-seen alone is not the answer.
+
+**Logon relationships (O25).** `tools/lanl_relations.py` is a plain detector, no fly involved. Per
+source computer and hour it counts logons whose user-source, source-destination and user-destination
+pairs are all new, failed users, and new destinations. Two signals above their lines put the source
+on a watchlist until an analyst clears it. Lines come from red-free days 3-4, before every scored
+slice. Credential switching, the core signal of
+[Hopper](https://arxiv.org/abs/2105.13442), was tried first and found 0 of 9 dev incidents here.
+
+| one queue entry per entity-hour | alerts | about the attack | false | precision | incidents |
+|---|---|---|---|---|---|
+| days 8-22, identity fly | 12 | 1 | 11 | 8% | 2 of 9 |
+| days 8-22, relations | 31 | 4 | 27 | 13% | 7 of 9 |
+| days 26-29, identity fly | 19 | 2 | 17 | 11% | 2 of 10 |
+| **days 26-29, relations** | 20 | 3 | 17 | **15%** | **8 of 10** |
+
+All 8 caught incidents on days 26-29 involve one computer, C17693, listed on day 8, so this measures
+a red team that reuses its machine. Five busy computers outside the red-team labels also stay
+listed and raise false alerts. Lines taken from days 16-19 showed 75%, but those days come after the alert they judge, so
+that number is not valid. Days 26-29 have now been run twice and are no longer unseen.
+
+```sh
+python3 -I tools/lanl_relations.py check
+python3 -I tools/lanl_relations.py final out.jsonl
+```
 
 **Still to do in Phase 9:** integrating over time with circuits from the connectome, judged against
 the failed-users count on LANL.
