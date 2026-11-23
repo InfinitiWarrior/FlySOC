@@ -75,9 +75,10 @@ data set, are in [Real data](#real-data-lanl).
   holds **36 alerts, 20 about the red team (56%), naming 2 of 6 incidents** (O21). **That does not
   generalise:** on four fresh days (15, 20, 21, 22) the same setup queues 12 alerts, none about the
   red team, and names **0 of 6 incidents** (O24). A plain logon-relationship detector beside the
-  flies names **8 of 10** incidents on days 26-29, where the identity fly names 2 of 10, with the
-  same 17 false alerts. Its precision is **15%**, and it relies on the red team reusing one
-  computer (O25).
+  flies (no fly involved) names **21 of 25** incidents with 3 false queue entries, where the
+  identity fly names 6 of 25 with 39. Over all 58 days it lists one computer, C17693, and no other.
+  That is **one discovery** followed over time: it finds 1 of the red team's 4 source computers,
+  6.7 days after that computer's first red logon (O25, O26).
 - Phase 8, done: baselines on the same final data, scored the same way. On synthetic data the flies
   win: the single fly names all 10 intrusions with no false episode (+78 s), the network fly 9 of
   10 at +36 s; the best baseline needs +240 s. On LANL a plain count of the identity fly's own input
@@ -1434,26 +1435,31 @@ Flagging logons whose user, source and destination pairs are all new catches 2 o
 
 **Logon relationships (O25).** `tools/lanl_relations.py` is a plain detector, no fly involved. Per
 source computer and hour it counts logons whose user-source, source-destination and user-destination
-pairs are all new, failed users, and new destinations. Two signals above their lines put the source
-on a watchlist until an analyst clears it. Lines come from red-free days 3-4, before every scored
-slice. Credential switching, the core signal of
-[Hopper](https://arxiv.org/abs/2105.13442), was tried first and found 0 of 9 dev incidents here.
+pairs are all new, failed users, and new destinations. A signal counts only above its line and the
+source's own highest count so far. Two signals within an hour, from day 5 on, put the source on a
+watchlist until an analyst clears it. Lines come from red-free days 3-4, before every scored slice.
+Credential switching, the core signal of [Hopper](https://arxiv.org/abs/2105.13442), was tried first
+and found 0 of 9 dev incidents here.
 
-| one queue entry per entity-hour | alerts | about the attack | false | precision | incidents |
-|---|---|---|---|---|---|
-| days 8-22, identity fly | 12 | 1 | 11 | 8% | 2 of 9 |
-| days 8-22, relations | 31 | 4 | 27 | 13% | 7 of 9 |
-| days 26-29, identity fly | 19 | 2 | 17 | 11% | 2 of 10 |
-| **days 26-29, relations** | 20 | 3 | 17 | **15%** | **8 of 10** |
+| one queue entry per entity-hour | detector | alerts | about the attack | false | precision | incidents |
+|---|---|---|---|---|---|---|
+| days 8, 15, 20-22 (rules chosen here) | identity fly | 12 | 1 | 11 | 8% | 2 of 9 |
+| | relations | 6 | 4 | 2 | 67% | 7 of 9 |
+| days 12-14 (new to this detector) | identity fly | 13 | 2 | 11 | 15% | 2 of 6 |
+| | **relations** | 4 | 4 | 0 | **100%** | **6 of 6** |
+| days 26-29 (third use) | identity fly | 19 | 2 | 17 | 11% | 2 of 10 |
+| | relations | 4 | 3 | 1 | 75% | 8 of 10 |
 
-All 8 caught incidents on days 26-29 involve one computer, C17693, listed on day 8, so this measures
-a red team that reuses its machine. Five busy computers outside the red-team labels also stay
-listed and raise false alerts. Lines taken from days 16-19 showed 75%, but those days come after the alert they judge, so
-that number is not valid. Days 26-29 have now been run twice and are no longer unseen.
+**Read that table with care.** Every relations alert names one computer, C17693, so the caught
+incidents are one discovery followed over time, not independent catches. Over all 58 days (101.7
+million remote human logons) it is the only computer ever listed, on day 8.4, including none in the
+28 days after the red team stops. The other three red-team sources (32 distinct labelled logons) are never
+found, and C17693 is listed 6.7 days after its first red logon. The rules were chosen on days that
+include that listing, so the clean 28 days are the stronger evidence.
 
 ```sh
 python3 -I tools/lanl_relations.py check
-python3 -I tools/lanl_relations.py final out.jsonl
+python3 -I tools/lanl_relations.py held out.jsonl   # also: dev, final
 ```
 
 **Still to do in Phase 9:** integrating over time with circuits from the connectome, judged against

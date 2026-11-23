@@ -482,6 +482,43 @@ change was made because of the leak and lowered the score. They are no longer un
 engine or the flies.
 **Lesson**: check where every threshold came from in time. A threshold from the future turned 15%
 into 75%.
+**Update**: O26 removes these false listings without using future data.
+
+### O26. Warm-up listings caused the false alerts; the detector now lists one machine in 58 days (P9, partly fixed)
+**Symptom**: O25's watchlist held five computers outside the red-team labels, and they stayed listed.
+**Cause**: the detector was armed from day 0. With almost no history every logon looks new, so busy
+computers were listed in the first days, before the lines' own calibration days had even passed.
+**Fix** (`tools/lanl_relations.py`): no alert or listing before day 5 (`ARMED_S`), and a signal counts
+only above both its line and that source's own highest count so far (`peak`). On days 8, 15, 20-22 arming
+alone left 11 false alerts, the baseline alone 18, both together 2.
+**Rejected on days 8, 15, 20-22**: watchlist expiry, tested before arming: 1 or 3 days lost incidents (5 of 9), 7 days kept 7 of 9 with 23 false.
+Keeping the busiest 1% or 5% of sources off the list changed nothing once the detector was armed.
+
+| one queue entry per entity-hour | detector | alerts | about the attack | false | precision | incidents |
+|---|---|---|---|---|---|---|
+| days 8, 15, 20-22 (rules chosen here) | identity fly | 12 | 1 | 11 | 8% | 2 of 9 |
+| | relations | 6 | 4 | 2 | 67% | 7 of 9 |
+| days 12-14 (never scored for this detector) | identity fly | 13 | 2 | 11 | 15% | 2 of 6 |
+| | relations | 4 | 4 | 0 | 100% | 6 of 6 |
+| days 26-29 (third use) | identity fly | 19 | 2 | 17 | 11% | 2 of 10 |
+| | relations | 4 | 3 | 1 | 75% | 8 of 10 |
+
+**Whole dataset, 58 days, 101.7 million remote human logons** (`data/runs/o26/full.txt`): exactly one
+computer is ever listed, C17693, on day 8.415. No computer is listed in the 28 days after the last
+red-team logon (day 29.6), which no earlier step had read. Of its 812 watchlist leads, 611 are
+labelled red-team logons (75%). 629 of the 715 distinct labelled logons come after the listing (88%).
+**What these numbers do not show**:
+- **One detection.** Every alert in the table names C17693, so the 21 caught incidents are one
+  discovery followed over time, not 21 independent catches.
+- **1 of 4 red-team sources.** C19932, C22409 and C18025 (32 distinct labelled logons) are never found.
+- **Late.** The first red logon from C17693 is on day 1.75, before the detector is armed. It is
+  listed 6.7 days after that.
+- **Chosen with this machine in view.** Arming and the baseline were picked on days that include its
+  listing, so its discovery is not independent evidence. The clean 28 days are.
+- The "false" queue entries are hours on C17693 with no labelled logon nearby. LANL labels only
+  logons, so some may be the attacker's own activity; they are counted as false.
+**Where**: `tools/lanl_relations.py`; runs in `data/runs/o26/`. Still not in the Rust engine.
+**Lesson**: when a result looks perfect, count independent events. Here 100% was one machine.
 
 ## Solved: measurement and alerts (since Phase 8)
 
