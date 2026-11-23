@@ -520,6 +520,31 @@ labelled red-team logons (75%). 629 of the 715 distinct labelled logons come aft
 **Where**: `tools/lanl_relations.py`; runs in `data/runs/o26/`. Still not in the Rust engine.
 **Lesson**: when a result looks perfect, count independent events. Here 100% was one machine.
 
+### O27. Following accounts from the listed machine does not find the other three (P9, rejected)
+**Symptom**: O26 finds C17693 but not C19932, C22409 or C18025. All three share an account with
+C17693 at some point, so following its accounts to other machines looked like a way to find them.
+**Test** (`data/runs/o27/pivot.py`, all 58 days): flag each account-machine pair first seen within a
+window around the time the account is tied to C17693 (the listing, or its first later logon there).
+There are 4 red account-machine pairs on those three sources. One, U3486 on C22409, never has a
+successful logon, so at most 3 can be found.
+
+| rule | accounts followed | pairs flagged | machines | red pairs found |
+|---|---|---|---|---|
+| 7 days back and forward | 117 | 3,278 | 3,108 | 3 of 4 |
+| 3 days back and forward | 117 | 2,212 | 2,174 | 1 of 4 |
+| 7 days, accounts on at most 50 machines | 116 | 581 | 490 | 2 of 4 |
+| 7 days, accounts on at most 20 machines | 108 | 422 | 371 | 1 of 4 |
+
+**Cause**: accounts on C17693 are ordinary roaming accounts. U1653 alone reaches 3,382 machines, and
+U737 and U748 reach 47 and 65, so a new machine for one of them is normal. Best precision is 2 of 581
+pairs (0.3%). The account cap was also read with the labels in view, so even that is optimistic.
+**Fix**: none. Not added to `tools/lanl_relations.py`.
+**Measurement trap**: counted per machine, a first run showed C18025 found in windows that cannot
+reach its red logon (day 2.43), because a different, innocent account was new there. Count the exact
+labelled pair.
+**Lesson**: a shared account links machines but does not implicate them. Account overlap can help an
+analyst look around a confirmed machine, but it is not an alert.
+
 ## Solved: measurement and alerts (since Phase 8)
 
 ### O18. Flies voted on alarms with nothing behind them (P11)

@@ -1457,6 +1457,10 @@ million remote human logons) it is the only computer ever listed, on day 8.4, in
 found, and C17693 is listed 6.7 days after its first red logon. The rules were chosen on days that
 include that listing, so the clean 28 days are the stronger evidence.
 
+Following C17693's accounts to other machines does not find the other three (O27). Reaching 3 of the
+4 red account-machine pairs flags 3,278 pairs on 3,108 machines, and the best variant is 2 red pairs
+in 581 (0.3%). These are ordinary roaming accounts, so the link can guide an analyst but is not an alert.
+
 ```sh
 python3 -I tools/lanl_relations.py check
 python3 -I tools/lanl_relations.py held out.jsonl   # also: dev, final
