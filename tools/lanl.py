@@ -4,6 +4,7 @@
 
     python3 tools/lanl.py <start_s> <hours> <out.jsonl>     (reads data/lanl/*.txt, unpacked)
     python3 tools/lanl.py [--attacker] <start_s>:<hours>[,<start_s>:<hours>...] <out.jsonl>
+    python3 tools/lanl.py --logons <end_s>     (auth events from time 0, whole seconds, to stdout)
 
 Times are rebased so the slice starts at 0. Several windows are played one after another, WINDOW_GAP_S
 apart (longer than the 15-minute history counts, so no count spans two windows). What each fly smells:
@@ -99,6 +100,12 @@ def events(start, end, offset=0, attacker=False):
 
 def main():
     args = sys.argv[1:]
+    if args[0] == "--logons":  # streamed, not held in memory: weeks of history for `flysoc relations`
+        for e in events(0, int(args[1])):
+            if e["kind"] != "auth":
+                break
+            sys.stdout.write(json.dumps(e) + "\n")
+        return
     attacker = "--attacker" in args
     args = [a for a in args if a != "--attacker"]
     if len(args) == 3:  # <start_s> <hours> <out>

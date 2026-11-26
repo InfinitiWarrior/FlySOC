@@ -517,7 +517,8 @@ labelled red-team logons (75%). 629 of the 715 distinct labelled logons come aft
   listing, so its discovery is not independent evidence. The clean 28 days are.
 - The "false" queue entries are hours on C17693 with no labelled logon nearby. LANL labels only
   logons, so some may be the attacker's own activity; they are counted as false.
-**Where**: `tools/lanl_relations.py`; runs in `data/runs/o26/`. Still not in the Rust engine.
+**Where**: `tools/lanl_relations.py`; runs in `data/runs/o26/`. Also `flysoc relations` (`src/relations.rs`),
+same alerts on every scored slice.
 **Lesson**: when a result looks perfect, count independent events. Here 100% was one machine.
 
 ### O27. Following accounts from the listed machine does not find the other three (P9, rejected)

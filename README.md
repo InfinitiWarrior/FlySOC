@@ -78,7 +78,7 @@ data set, are in [Real data](#real-data-lanl).
   flies (no fly involved) names **21 of 25** incidents with 3 false queue entries, where the
   identity fly names 6 of 25 with 39. Over all 58 days it lists one computer, C17693, and no other.
   That is **one discovery** followed over time: it finds 1 of the red team's 4 source computers,
-  6.7 days after that computer's first red logon (O25, O26).
+  6.7 days after that computer's first red logon (O25, O26). It runs in the engine as `flysoc relations`.
 - Phase 8, done: baselines on the same final data, scored the same way. On synthetic data the flies
   win: the single fly names all 10 intrusions with no false episode (+78 s), the network fly 9 of
   10 at +36 s; the best baseline needs +240 s. On LANL a plain count of the identity fly's own input
@@ -152,7 +152,8 @@ cargo run --release -- detect --train data/telemetry/train.jsonl data/telemetry/
 cargo run --release -- cluster data/telemetry/cluster_train.jsonl data/telemetry/cluster_holdout.jsonl
 cargo run --release -- watch data/telemetry/cluster_train.jsonl data/telemetry/cluster_holdout.jsonl
 cargo run --release -- cover data/telemetry/cluster_train.jsonl data/telemetry/cluster_holdout.jsonl > cover.tsv
-cargo test --release            # 36 tests, below
+python3 -I tools/lanl.py --logons 2559600 | cargo run --release -- relations > alerts.jsonl  # LANL days 0-29.6
+cargo test --release            # 37 tests, below
 ```
 
 `cargo test` checks the encoding (stable odours, history counts, the overlapping count code pinned
@@ -163,7 +164,8 @@ days, keeping what attacks taught, the floor falling with frequency, attack wind
 counts not counted as harmless sightings, flies counting independently), the sharded readout (one threshold for busy
 and quiet shards, bursts standing out), explanations (every count's sentence and technique, no
 claim without fan-out, reasons carried through, the four verdicts of a counterfactual replay and
-which events involve a suspect), the fan-out vote, and one GPU spike test (skipped without `data/fly.bin`).
+which events involve a suspect), the fan-out vote, the logon-relationship detector (quiet known
+logons, two signals, the lasting watchlist, warm-up, each source's own peak), and one GPU spike test (skipped without `data/fly.bin`).
 The sleep and readout tests were checked against planted bugs (overwriting instead of restoring,
 min for max, wrong scaling, counting attack seconds or spikes, no reset, dividing by a constant):
 each fails at least one test.
@@ -184,6 +186,10 @@ for every fly and the cluster to stderr. The trained cluster is cached in `data/
 training file, the calibration file and the FlySOC binary: the first run trains and calibrates
 (about 2 minutes: 19 s training, 96 s calibration replays), later runs load it at once
 and only play the events (about 17 s for 2400 s of telemetry).
+
+`relations` reads JSON events on stdin and prints one JSON alert per line, without loading the fly:
+the logon-relationship detector of [Phase 9](#phase-9-how-many-not-who), a port of
+`tools/lanl_relations.py`. It needs days of history, so it streams instead of reading a slice.
 
 `watch <labelled> <events>` trains the cluster the same way (or loads it from the cache), then plays
 `events` live in 3D. The four specialists are a 2x2 grid on the left (network and identity on top,
@@ -1464,7 +1470,13 @@ in 581 (0.3%). These are ordinary roaming accounts, so the link can guide an ana
 ```sh
 python3 -I tools/lanl_relations.py check
 python3 -I tools/lanl_relations.py held out.jsonl   # also: dev, final
+python3 -I tools/lanl.py --logons 2559600 | cargo run --release -- relations > alerts.jsonl
 ```
+
+`flysoc relations` is the same detector in the engine. Each alert says why, for example "C17693: 6
+logons whose user, source and destination were never seen in pairs and 11 destinations never logged
+on to before in the last hour, each above its line and C17693's own past peak". On days 0-29.6 it
+gives the same 545 slice alerts as the Python tool, alert for alert (`data/runs/o28/same.py`).
 
 **Still to do in Phase 9:** integrating over time with circuits from the connectome, judged against
 the failed-users count on LANL.

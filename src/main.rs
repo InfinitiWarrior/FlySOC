@@ -1,5 +1,6 @@
 mod cluster;
 mod detect;
+mod relations;
 mod sim;
 mod view;
 
@@ -9,11 +10,19 @@ use std::time::Instant;
 const USAGE: &str = "usage: flysoc [view | bench | detect [--train <labelled.jsonl>] <baseline.jsonl> <events.jsonl>
               | cluster <labelled.jsonl> <events.jsonl> | cover <labelled.jsonl> <events.jsonl>
               | watch <labelled.jsonl> <events.jsonl>
-              | snapshot <labelled.jsonl> <events.jsonl> <second> <out.ppm>]
+              | snapshot <labelled.jsonl> <events.jsonl> <second> <out.ppm>
+              | relations < events.jsonl]
 fly brain is read from $FLYSOC_FLY, default data/fly.bin";
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args == ["relations"] {
+        // no fly involved: skip loading the connectome
+        return relations::run().unwrap_or_else(|e| {
+            eprintln!("{e}");
+            std::process::exit(1)
+        });
+    }
     let path = std::env::var("FLYSOC_FLY").unwrap_or("data/fly.bin".into());
     let t = std::time::Instant::now();
     let (fly, syn) = Fly::load(&path).unwrap_or_else(|e| {
