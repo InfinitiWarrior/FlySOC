@@ -43,7 +43,7 @@ pub struct Synapses {
 /// Bits of a packed synapse that hold the target neuron: up to 2^19 = 524,288 neurons in one
 /// simulation (56 circuits of 9,262). The other 13 hold the signed count; FlyWire's largest is 2405.
 pub const POST_BITS: u32 = 19;
-const POST: u32 = (1 << POST_BITS) - 1;
+pub const POST: u32 = (1 << POST_BITS) - 1;
 
 /// Learnable connections, kept apart from the packed fixed ones.
 #[derive(Default, Clone)]

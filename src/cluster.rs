@@ -98,6 +98,8 @@ pub struct Cluster {
     pub thresholds: Vec<f64>,
     /// The mushroom body as training left it, with its day counters; only when freshly trained.
     pub trained: Option<MushroomBody>,
+    /// The trained weights, fresh or from the cache, for learning from analyst marks (Phase 10).
+    pub mb: MushroomBody,
 }
 
 /// Puts one copy of the circuit per fly into a single simulation, trains every fly on its own
@@ -133,7 +135,8 @@ pub fn build(device: &wgpu::Device, queue: &wgpu::Queue, circuit: Fly, syn: Syna
     if let Some((w, thresholds)) = load_cache(&cache, mb.plastic.w.len(), FLIES.len()).filter(|_| !fresh) {
         sim.set_plastic(queue, &w);
         eprintln!("loaded the trained cluster from {cache}");
-        return Ok(Cluster { circuit, sim, encs, thresholds, trained: None });
+        mb.plastic.w = w;
+        return Ok(Cluster { circuit, sim, encs, thresholds, trained: None, mb });
     }
 
     let train = detect::read_events(train_path)?;
@@ -176,7 +179,7 @@ pub fn build(device: &wgpu::Device, queue: &wgpu::Queue, circuit: Fly, syn: Syna
     if let Err(e) = save_cache(&cache, &mb.plastic.w, &thresholds) {
         eprintln!("could not cache the trained cluster: {e}");
     }
-    Ok(Cluster { circuit, sim, encs, thresholds, trained: Some(mb) })
+    Ok(Cluster { circuit, sim, encs, thresholds, trained: Some(mb.clone()), mb })
 }
 
 /// Cache file: u32 fly count, u32 weight count, f64 threshold per fly, f32 plastic weights.
@@ -387,7 +390,10 @@ pub fn run(fly: &Fly, syn: Synapses, train: &str, events: &str) -> Result<(), St
         eprintln!("{name:>10}: fires above {:.1} MBON spikes/s ({EVIDENCE_S} s average)", c.thresholds[f]);
     }
     let seconds = detect::duration(&events);
-    let windows = pool(detect::play(&device, &queue, &c.sim, &c.circuit, &c.encs, &events, seconds, None));
+    let windows = match marks() {
+        0 => pool(detect::play(&device, &queue, &c.sim, &c.circuit, &c.encs, &events, seconds, None)),
+        budget => pool(play_marked(&device, &queue, &c, &events, seconds, budget)),
+    };
     let labels = labels_per_second(&events, seconds);
 
     let mut coord = Coordinator::new(&c.thresholds);
@@ -457,6 +463,55 @@ pub fn run(fly: &Fly, syn: Synapses, train: &str, events: &str) -> Result<(), St
         eprintln!("{:>13}  {}", format!("cluster {name}"), score(&labels, &cluster[r]));
     }
     Ok(())
+}
+
+/// FLYSOC_MARKS=<n>: a simulated analyst marks the first n new queue entries (Phase 10).
+fn marks() -> usize {
+    std::env::var("FLYSOC_MARKS").ok().and_then(|v| v.parse().ok()).unwrap_or(0)
+}
+
+/// Plays `events` while a simulated analyst reviews new queue entries as they are raised, up to
+/// `budget` of them and each entity once: real if an event involving the entity in the last TAIL_S
+/// seconds is labelled an attack, else a false alarm. A false alarm is the dopamine signal for the
+/// flies that fired: that second's Kenyon cells are safe (the training rule, `MushroomBody::learn`),
+/// and the flies play on changed.
+fn play_marked(device: &wgpu::Device, queue: &wgpu::Queue, c: &Cluster, events: &[Event], seconds: usize, budget: usize) -> Vec<Vec<detect::Window>> {
+    assert!(replicas() == 1 && !sharded(), "analyst marks need one fly per role");
+    let mut coord = Coordinator::new(&c.thresholds);
+    let (mut left, mut last, mut real) = (budget, std::collections::HashMap::<String, usize>::new(), 0);
+    let mut marked = std::collections::HashSet::<String>::new(); // each entity is marked once
+    let mut mark = |s: usize, w: &[detect::Window]| -> Vec<Option<bool>> {
+        let mbon: Vec<u32> = w.iter().map(|w| w.spikes[detect::DETECT_ON]).collect();
+        let suspects: Vec<Vec<String>> = w.iter().map(|w| w.suspects.clone()).collect();
+        let fan: Vec<bool> = w.iter().map(fan_out).collect();
+        let now = coord.second(s, &mbon, &suspects, &fan);
+        let mut out = vec![None; w.len()];
+        let Some((_, _, entity, _)) = coord.alert(s, &now, &suspects) else { return out };
+        let new_entry = last.insert(entity.clone(), s).is_none_or(|t| s - t >= 60);
+        if !new_entry || left == 0 || !marked.insert(entity.clone()) {
+            return out;
+        }
+        left -= 1;
+        let is_real = attack_near(events, &entity, s);
+        real += is_real as usize;
+        eprintln!("analyst mark at {s} s: {entity} {}", if is_real { "real (teaches nothing)" } else { "false alarm (safe)" });
+        // only false alarms teach: a real mark restoring weights made the fly louder about benign
+        // machines too, and a lasting "safe" verdict blinded it to an attacker marked once (O30)
+        let teach = (!is_real).then_some(true);
+        (0..w.len()).filter(|&f| now[f]).for_each(|f| out[f] = teach);
+        out
+    };
+    let mut mb = c.mb.clone();
+    let windows = detect::play_marked(device, queue, &c.sim, &c.circuit, &c.encs, events, seconds, &mut mb, &mut mark);
+    eprintln!("analyst marked {} queue entries: {real} real, {} false alarms", budget - left, budget - left - real);
+    c.sim.set_plastic(queue, &c.mb.plastic.w); // later replays (FLYSOC_VERIFY) start from the trained fly
+    windows
+}
+
+/// Whether an event involving `who` in the TAIL_S seconds up to second `s` is labelled an attack.
+fn attack_near(events: &[Event], who: &str, s: usize) -> bool {
+    let from = events.partition_point(|e| e.ts < s.saturating_sub(TAIL_S) as f64);
+    events[from..].iter().take_while(|e| e.ts < (s + 1) as f64).any(|e| e.involves(who) && !detect::is_safe(std::slice::from_ref(&e.label)))
 }
 
 /// Counterfactual attribution (Phase 11): the explanation names a suspect from FlySOC's

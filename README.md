@@ -88,13 +88,18 @@ data set, are in [Real data](#real-data-lanl).
   accounts a source fails with; on a big network names are new everywhere. The identity fly now
   smells only the counts ([Phase 9](#phase-9-how-many-not-who)), on a fine scale where every count
   up to 12 has its own glomeruli (O20): LANL final attack episodes 4 to 19, synthetic final false
-  alert seconds 94 to 8. Still to do: integrating over time.
+  alert seconds 94 to 8. Integrating over time with the connectome is open: the neurons the MBONs
+  feed latch or time out instead of summing (O29), so the hand-written 20 s average stays.
 - Phase 10, started: sleep is built (`MushroomBody::sleep`, opt-in `FLYSOC_SLEEP=1`): at night each
   Kenyon cell's output weight is restored to a floor set by how rarely it fired in harmless seconds
   ([Sleep](#sleep-phase-10-mushroombodysleep-opt-in-flysoc_sleep1)); 13 Rust tests, 14 Lean
   theorems. Measured on the eval sets it changes nothing that matters (LANL 11 attack episodes
   against 10, synthetic identical), so it stays off: the identity fly's blind spot is in the
-  encoding, not in over-learned weights (O16, O17). Analyst marks and dreams come next.
+  encoding, not in over-learned weights (O16, O17). Analyst marks are built (`FLYSOC_MARKS`,
+  off by default): a false alarm marked by a simulated analyst teaches the flies that fired. On LANL
+  days 26-29, 10 marks per slice cut false queue entries from 17 to 13 but lost 1 of 2 incidents
+  named: marks on two benign machines quieted the identity fly about the attacker too, because it
+  smells counts, not names (O30). Dreams come next.
 - Phase 11, done for the alert text: every JSON alert says why each firing fly fired, with the
   count behind it, and which ATT&CK technique that fits; checked by hand on synthetic and LANL
   alerts ([Phase 11](#phase-11-explaining-alerts)). The explanations exposed that every false DNS
@@ -153,7 +158,7 @@ cargo run --release -- cluster data/telemetry/cluster_train.jsonl data/telemetry
 cargo run --release -- watch data/telemetry/cluster_train.jsonl data/telemetry/cluster_holdout.jsonl
 cargo run --release -- cover data/telemetry/cluster_train.jsonl data/telemetry/cluster_holdout.jsonl > cover.tsv
 python3 -I tools/lanl.py --logons 2559600 | cargo run --release -- relations > alerts.jsonl  # LANL days 0-29.6
-cargo test --release            # 37 tests, below
+cargo test --release            # 38 tests, below
 ```
 
 `cargo test` checks the encoding (stable odours, history counts, the overlapping count code pinned
@@ -165,7 +170,9 @@ counts not counted as harmless sightings, flies counting independently), the sha
 and quiet shards, bursts standing out), explanations (every count's sentence and technique, no
 claim without fan-out, reasons carried through, the four verdicts of a counterfactual replay and
 which events involve a suspect), the fan-out vote, the logon-relationship detector (quiet known
-logons, two signals, the lasting watchlist, warm-up, each source's own peak), and one GPU spike test (skipped without `data/fly.bin`).
+logons, two signals, the lasting watchlist, warm-up, each source's own peak), analyst marks (no marks
+equals plain play, a mark teaches only the marked fly), and two GPU tests (skipped without `data/fly.bin`). An ignored probe, `memory`, measures how
+long the neurons downstream of the MBONs keep firing (O29).
 The sleep and readout tests were checked against planted bugs (overwriting instead of restoring,
 min for max, wrong scaling, counting attack seconds or spikes, no reset, dividing by a constant):
 each fails at least one test.
@@ -215,6 +222,9 @@ of giving each all events, each measured against its own 30-minute background (O
 empty for none; Phase 9).
 `FLYSOC_VERIFY=1` checks each new alert's suspect by a counterfactual replay ([Phase 11](#phase-11-explaining-alerts)).
 `FLYSOC_ROSTER=identity,...` lets only the listed flies fire; a roster of one raises leads alone (O21). Use `identity` on LANL.
+`FLYSOC_MARKS=<n>` lets a simulated analyst mark the first n new queue entries, one per machine, as
+they are raised; a false alarm teaches the flies that fired that its Kenyon cells were safe
+([Phase 10](#phase-10-design-a-fly-that-sleeps), O30). Off by default; one fly per role only.
 
 `FLYSOC_CALIB=<file>` calibrates thresholds on another benign file (default
 `data/telemetry/cluster_calib.jsonl`; LANL uses its own weekday slice).
@@ -257,6 +267,12 @@ stable without adaptation, so it is the Shiu model unchanged:
 
 The result is sparse Kenyon cell coding (about 1% active, flies show 5-10%), and scans and bursts
 give different Kenyon cell patterns (cosine similarity 0.13, up from 0.93 in the whole brain).
+
+**Evidence over time (cluster):** a fly's alarm reads a 20 s exponential average of its MBON spikes
+([Alarms](#alarms-clusterrs)), written by hand, not simulated. 20 s of telemetry is 1 s of fly time.
+The neurons the MBONs feed cannot stand in for it in this model (O29): with their loops kept, one
+weak kick latches them for good, and with adaptation they fire a burst of fixed length, the same
+for 5 Hz input as for 100 Hz. Neither tells one odd logon from twenty.
 
 ## Encoding
 
@@ -1478,8 +1494,11 @@ logons whose user, source and destination were never seen in pairs and 11 destin
 on to before in the last hour, each above its line and C17693's own past peak". On days 0-29.6 it
 gives the same 545 slice alerts as the Python tool, alert for alert (`data/runs/o28/same.py`).
 
-**Still to do in Phase 9:** integrating over time with circuits from the connectome, judged against
-the failed-users count on LANL.
+**Still to do in Phase 9:** integrating over time with circuits from the connectome. A first probe
+found nothing to use: driven for 100 ms, the 1,118 neurons with 20 or more synapses from the MBONs
+either fire forever (no adaptation) or for a fixed 100-400 ms set by adaptation, whatever the input
+rate (O29, `cargo test --release memory -- --ignored --nocapture`). Memory held in synapses, such as
+the MBON-dopamine loops, would need dopamine release modelled.
 
 ## Phase 11: explaining alerts
 
@@ -1610,8 +1629,25 @@ overwriting it. The mushroom body's sparse expansion with local, dopamine-gated 
 forgetting by construction (Shen, Dasgupta and Navlakha 2023); sleep then only has to fix what
 the fly gets wrong, how often each pattern is harmless. That was an expectation; the first
 measurements (O17) say sleep's consolidation is safe but does not, on its own, fix O16: the fly's
-blind spot is in how counts are encoded, not in over-learned weights. Dreams and analyst marks are
-still to be measured. The fly cannot reason or
+blind spot is in how counts are encoded, not in over-learned weights.
+
+**Analyst marks (measured, O30).** `FLYSOC_MARKS=<n>`: a simulated analyst reviews new queue
+entries as they are raised, each machine once, and a false alarm teaches the flies that fired, by
+the same Hige rule as training, on that second's Kenyon cells. Real marks teach nothing: restoring
+weights made the fly louder about benign machines too. Chosen on days 8, 15, 20-22, reported once
+(identity fly, 10 marks per 4-hour slice):
+
+| LANL slices | queue | false | incidents named |
+|---|---|---|---|
+| days 12-14, no marks / marks | 13 / 12 | 11 / 10 | 2 of 6 / 2 of 6 |
+| days 26-29, no marks / marks | 19 / 14 | 17 / 13 | 2 of 10 / **1 of 10** |
+
+Marks cut alarms where they land (day 29: 283 alarm seconds to 70 with 4 marks), but on day 26 two
+marks on benign machines pushed the attacker's marginal alarm below threshold. The identity fly
+smells counts, not names, so "safe on this machine" becomes "safe everywhere". Phase 10's
+requirement that a mark not blind the fly to an attack from another source is not met yet.
+
+Dreams are still to be measured. The fly cannot reason or
 generalise like an LLM; the claim is only about learning what is normal on one network over time.
 
 ## Memory

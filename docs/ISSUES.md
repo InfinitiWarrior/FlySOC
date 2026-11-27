@@ -548,6 +548,79 @@ analyst look around a confirmed machine, but it is not an alert.
 
 ## Solved: measurement and alerts (since Phase 8)
 
+### O29. The neurons the MBONs feed latch or time out; they do not integrate (P9, open)
+**Symptom**: Phase 9 asks to replace the hand-written 20 s evidence average (`cluster.rs`
+`evidence`, `EVIDENCE_S`) with a circuit from the connectome. 20 s of telemetry is 1 s of fly time,
+so that circuit must hold activity for about a second, in proportion to how much input it got.
+**Probe** (`cargo test --release memory -- --ignored --nocapture`, `src/main.rs` `downstream_memory`;
+output in `data/runs/o29/memory.txt`): the 96 MBONs plus every neuron with at least 20 (1,118
+neurons) or 5 (2,510) excitatory synapses from them, all their connections kept, loops included.
+The MBONs are driven for 100 ms, then silent. Downstream spikes per 50 ms after the input stops:
+
+| adaptation (mV per spike) | MBONs at 5 Hz | MBONs at 100 Hz |
+|---|---|---|
+| 0 | about 1,500 per bin, forever | the same |
+| 0.5 | about 1,000 per bin for 350 ms, then 0 | the same, 400 ms |
+| 1 | 250 ms, then 0 | 200 ms |
+| 2 to 10 (the brain's) | under 100 ms | under 100 ms |
+
+**Cause**: the downstream wiring is dense enough to run on its own once kicked, and with this point
+neuron model the run is all or nothing. Without adaptation a single weak kick latches it for good.
+Adaptation turns that into a timer whose length is set by the adaptation, not by the input: 5 Hz and
+100 Hz give the same burst. Of the 300 most MBON-excited neurons, mostly unannotated SMP, SIP and
+CRE types, the median gets 11% of its excitatory input from the others, and they inhibit each other
+more than they excite. Nothing there sums inputs gradually.
+**Fix**: none. The 20 s average stays, documented as a departure (README "Model").
+**What could still work**: memory that lives in synapses rather than spikes, such as the MBON-DAN
+feedback loops (10 of the 300 neurons the MBONs excite most are DANs), which act through
+plasticity. That needs a model of dopamine release, which this simulation leaves out (`detect.rs`
+`NOT_SIMULATED`).
+**Lesson**: check a circuit's input-output curve before wiring it in. Activity that lasts is not
+memory unless it grows with the input.
+
+### O30. Analyst marks cut false alarms, and a mark on a benign machine blinded the fly to the attacker (P10, open)
+**What was built** (`FLYSOC_MARKS=<n>`, `cluster.rs` `play_marked`, `detect.rs` `play_marked`): a
+simulated analyst reviews new queue entries as they are raised, up to n per run and each machine
+once. An entry is real if an event involving the machine in the last 60 s is labelled red team,
+else a false alarm. A false alarm is the dopamine signal of training (`MushroomBody::learn`, safe)
+for the flies that fired, on that second's Kenyon cells, and they play on with the new weights.
+Test: `a_mark_teaches_only_the_marked_fly` (no marks equals plain play; a mark changes only the
+marked fly, and quiets it). Off by default; with 0 marks every slice reproduces O24's numbers.
+**Chosen on the dev slices** (days 8, 15, 20-22, `FLYSOC_ROSTER=identity`, 10 marks per 4-hour
+slice, `data/runs/p10/`). Every variant gave the same queue: 12 entries with 11 false became 9 with
+8, still 2 of 9 incidents. They differed in side effects:
+
+| variant | side effect on dev |
+|---|---|
+| every mark teaches; a real mark restores weights (the training rule) | alarm seconds about benign C1611 rose from 10 to 268: restoring weights made the fly louder for everything sharing those Kenyon cells |
+| a false verdict sticks: every later alarm on that machine teaches "safe" | C17693 was marked false in an hour with no labelled logon nearby (LANL labels only logons); its red-labelled alarm seconds fell from 33 to 13 |
+| **each machine once, only false alarms teach** (kept) | the same wrong mark cost 33 to 31 |
+
+**Reported once** (10 marks per slice, one queue entry per entity-hour, `tools/lanl_relations.py` scoring):
+
+| slices | marks used | queue | false | precision | incidents |
+|---|---|---|---|---|---|
+| days 12-14, no marks | 0 | 13 | 11 | 15% | 2 of 6 |
+| days 12-14, marks | 12 (2 real) | 12 | 10 | 17% | 2 of 6 |
+| days 26-29, no marks | 0 | 19 | 17 | 11% | 2 of 10 |
+| days 26-29, marks | 14 (0 real) | 14 | 13 | 7% | **1 of 10** |
+
+Alarm volume falls where marks land: on day 29, 4 marks took the alarm seconds from 283 to 70.
+**Symptom**: on day 26 (`final_4`) the analyst marked two benign machines, C5808 and C5787, and the
+fly then missed its only catch, C17693 at 1.0-1.2x its threshold about 3 hours later. Phase 10's
+done-when asks that a mark on one benign source not blind the fly to an attack from another: this
+fails.
+**Cause**: the identity fly smells only counts, not names (Phase 9, O16). "This was safe on C5787"
+is learned as "this count pattern is safe", for every machine. A marginal catch drops under.
+Also, one of the 14 marks on days 26-29 called C17693 a false alarm (`final_5`), because no
+labelled logon fell in the minute before. A real analyst would know better; the simulation cannot.
+**Fix**: none yet. Marks stay off by default.
+**Next**: let a mark teach only what was specific to the marked machine, for example a fly that
+smells the source's name beside the counts, so "safe" can attach to one machine; or apply marks
+as a per-machine allowance in the coordinator instead of in the fly's weights.
+**Lesson**: learning from a mark generalises exactly as far as the odour does. A fly that cannot
+tell machines apart cannot be told that one machine is fine.
+
 ### O18. Flies voted on alarms with nothing behind them (P11)
 **Symptom**: on LANL, the DNS fly raised 25 alarm episodes on the eval slices and 72 on the final
 ones, none about the attack. Phase 11's explanations said why for every one: *no fan-out behind

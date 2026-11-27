@@ -639,7 +639,43 @@ pub fn play_primed(
     prime: &[Event],
     events: &[Event],
     seconds: usize,
+    learn: Option<&mut MushroomBody>,
+) -> Vec<Vec<Window>> {
+    play_inner(device, queue, sim, fly, encs, prime, events, seconds, learn, None)
+}
+
+/// A per-second hook: given the second and its windows, per fly Some(safe) to learn from now.
+pub type Marks<'m> = &'m mut dyn FnMut(usize, &[Window]) -> Vec<Option<bool>>;
+
+/// `play`, where the mushroom body learns only when `mark` says so (Phase 10, analyst marks): the
+/// fly marked learns from that second's Kenyon cells, safe or not, and plays on with its new weights.
+#[allow(clippy::too_many_arguments)]
+pub fn play_marked(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    sim: &Sim,
+    fly: &Fly,
+    encs: &[Encoder],
+    events: &[Event],
+    seconds: usize,
+    mb: &mut MushroomBody,
+    mark: Marks,
+) -> Vec<Vec<Window>> {
+    play_inner(device, queue, sim, fly, encs, &[], events, seconds, None, Some((mb, mark)))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn play_inner(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    sim: &Sim,
+    fly: &Fly,
+    encs: &[Encoder],
+    prime: &[Event],
+    events: &[Event],
+    seconds: usize,
     mut learn: Option<&mut MushroomBody>,
+    mut marks: Option<(&mut MushroomBody, Marks)>,
 ) -> Vec<Vec<Window>> {
     let mut player = Player::new(device, queue, sim, fly.n, encs, events);
     prime.iter().for_each(|e| {
@@ -657,7 +693,18 @@ pub fn play_primed(
             sim.set_plastic(queue, &mb.plastic.w);
         }
         let suspects = player.suspects();
-        for (f, w) in windows(fly, &fired, labels, suspects).into_iter().enumerate() {
+        let ws = windows(fly, &fired, labels, suspects);
+        if let Some((mb, mark)) = marks.as_mut() {
+            let said = mark(player.second() - 1, &ws);
+            for (f, safe) in said.iter().enumerate().filter_map(|(f, m)| m.map(|safe| (f, safe))) {
+                let range = mb.of_fly(f, fly.n);
+                mb.learn(&fired, safe, range);
+            }
+            if said.iter().any(Option::is_some) {
+                sim.set_plastic(queue, &mb.plastic.w);
+            }
+        }
+        for (f, w) in ws.into_iter().enumerate() {
             out[f].push(w);
         }
     }
@@ -1248,5 +1295,43 @@ mod tests {
         mb.learn(&spikes(1, &[0], 2), false, 0..1);
         assert!(mb.plastic.w[0] > low, "an attack still restores by day");
         assert_eq!(mb.seen, [1], "and the new day is being counted");
+    }
+}
+
+#[cfg(test)]
+mod marks {
+    use super::*;
+
+    /// Phase 10: with no marks, marked play is plain play; a mark on fly 0 changes fly 0's
+    /// output weights only, and then its readout.
+    #[test]
+    fn a_mark_teaches_only_the_marked_fly() {
+        let Ok((whole, syn)) = Fly::load("data/fly.bin") else { return eprintln!("no data/fly.bin, skipping") };
+        let (fly, syn) = circuit(&whole, &syn);
+        let (syn, one) = MushroomBody::split(&fly, syn);
+        let mb = one.replicate(2, fly.n);
+        let (_, device, queue) = crate::sim::device(&crate::sim::instance(None), None);
+        let sim = Sim::new(&device, &queue, 2 * fly.n, syn.replicate(2), &mb.plastic, 0.0);
+        let encs = [Encoder::new(&fly, &["conn"]), Encoder::new(&fly, &["conn"])];
+        let events: Vec<Event> = (0..400)
+            .map(|i| serde_json::from_value(serde_json::json!({"ts": i as f64 / 40.0, "src": "a", "dst": "b", "dport": 1000 + i % 50})).unwrap())
+            .collect();
+        let spikes = |w: &[Vec<Window>], f: usize| w[f].iter().map(|w| w.spikes[DETECT_ON]).collect::<Vec<_>>();
+
+        let plain = play(&device, &queue, &sim, &fly, &encs, &events, 10, None);
+        let mut quiet = mb.clone();
+        let unmarked = play_marked(&device, &queue, &sim, &fly, &encs, &events, 10, &mut quiet, &mut |_, w| vec![None; w.len()]);
+        assert_eq!((spikes(&plain, 0), spikes(&plain, 1)), (spikes(&unmarked, 0), spikes(&unmarked, 1)), "no marks, no change");
+        assert_eq!(quiet.plastic.w, mb.plastic.w);
+
+        let mut taught = mb.clone();
+        let marked = play_marked(&device, &queue, &sim, &fly, &encs, &events, 10, &mut taught, &mut |s, w| {
+            (0..w.len()).map(|f| (f == 0 && (3..6).contains(&s)).then_some(true)).collect()
+        });
+        let (r0, r1) = (taught.of_fly(0, fly.n), taught.of_fly(1, fly.n));
+        assert!(taught.plastic.w[r0.clone()].iter().zip(&mb.plastic.w[r0]).any(|(a, b)| a < b), "fly 0 learned it is safe");
+        assert_eq!(taught.plastic.w[r1.clone()], mb.plastic.w[r1], "fly 1 was not marked");
+        assert_eq!(spikes(&marked, 1), spikes(&plain, 1), "fly 1 plays on unchanged");
+        assert!(spikes(&marked, 0)[7..].iter().sum::<u32>() < spikes(&plain, 0)[7..].iter().sum::<u32>(), "fly 0 quieter after its marks");
     }
 }

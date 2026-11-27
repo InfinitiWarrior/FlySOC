@@ -169,3 +169,49 @@ mod tests {
         assert!(downstream > 100, "only {downstream} unstimulated neurons fired");
     }
 }
+
+#[cfg(test)]
+mod memory {
+    use super::*;
+
+    /// Phase 9 probe (ISSUES O29): do the neurons the MBONs excite hold activity after the MBONs
+    /// stop? The 20 s evidence average spans 1 s of fly time. MBONs are driven for 100 ms, then
+    /// silent; prints spikes per 50 ms bin of the downstream neurons, all their connections kept.
+    /// `cargo test --release memory -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn downstream_memory() {
+        let Ok((fly, syn)) = Fly::load("data/fly.bin") else { return eprintln!("no data/fly.bin, skipping") };
+        let mbon: Vec<bool> = { let mut v = vec![false; fly.n as usize]; fly.of_class("MBON").into_iter().for_each(|i| v[i as usize] = true); v };
+        // excitatory synapses each neuron receives from MBONs, and its strongest-fed rank
+        let mut from_mbon = vec![0i64; fly.n as usize];
+        for pre in (0..fly.n as usize).filter(|&i| mbon[i]) {
+            for &s in &syn.syn[syn.row_ptr[pre] as usize..syn.row_ptr[pre + 1] as usize] {
+                let w = s as i32 >> sim::POST_BITS;
+                if w > 0 { from_mbon[(s & sim::POST) as usize] += w as i64; }
+            }
+        }
+        let (_, device, queue) = sim::device(&sim::instance(None), None);
+        for (min, adapt) in [(20, 0.0), (20, 0.5), (20, 1.0), (20, 2.0), (20, 4.0), (20, BRAIN_ADAPT), (5, BRAIN_ADAPT)] {
+            let keep = |i: u32| mbon[i as usize] || from_mbon[i as usize] >= min;
+            let (sub, ssyn) = fly.circuit(&syn, keep, |_, _, _| false);
+            let is_mbon: Vec<bool> = (0..sub.n as usize).map(|k| sub.names.cell_class.get(sub.cell_class[k] as usize).is_some_and(|c| c == "MBON")).collect();
+            let sim = Sim::new(&device, &queue, sub.n, ssyn, &Plastic::default(), adapt);
+            for rate in [5.0f32, 100.0] {
+                sim.reset(&device, &queue);
+                sim.take_fired(&device, &queue);
+                let mut row = Vec::new();
+                for bin in 0..30 {
+                    let r: Vec<f32> = is_mbon.iter().map(|&m| if m && bin < 2 { rate } else { 0.0 }).collect();
+                    sim.set_stim(&queue, &r);
+                    let mut enc = device.create_command_encoder(&Default::default());
+                    sim.encode(&mut enc, 50 * STEPS_PER_MS);
+                    queue.submit([enc.finish()]);
+                    let f = sim.take_fired(&device, &queue);
+                    row.push(f.iter().zip(&is_mbon).filter(|(_, m)| !**m).map(|(x, _)| *x as u64).sum::<u64>());
+                }
+                println!("adapt {adapt:2} mV, downstream >= {min:2} MBON synapses ({} neurons), MBONs at {rate} Hz for 100 ms: {row:?}", sub.n as usize - is_mbon.iter().filter(|&&m| m).count());
+            }
+        }
+    }
+}
