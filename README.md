@@ -1645,7 +1645,9 @@ weights made the fly louder about benign machines too. Chosen on days 8, 15, 20-
 Marks cut alarms where they land (day 29: 283 alarm seconds to 70 with 4 marks), but on day 26 two
 marks on benign machines pushed the attacker's marginal alarm below threshold. The identity fly
 smells counts, not names, so "safe on this machine" becomes "safe everywhere". Phase 10's
-requirement that a mark not blind the fly to an attack from another source is not met yet.
+requirement that a mark not blind the fly to an attack from another source is not met yet. Shards,
+which would confine a mark to the individual smelling the marked machine, lose the attacker even
+without marks (0 of 9 dev incidents).
 
 Dreams are still to be measured. The fly cannot reason or
 generalise like an LLM; the claim is only about learning what is normal on one network over time.

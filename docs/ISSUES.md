@@ -615,9 +615,13 @@ is learned as "this count pattern is safe", for every machine. A marginal catch 
 Also, one of the 14 marks on days 26-29 called C17693 a false alarm (`final_5`), because no
 labelled logon fell in the minute before. A real analyst would know better; the simulation cannot.
 **Fix**: none yet. Marks stay off by default.
-**Next**: let a mark teach only what was specific to the marked machine, for example a fly that
-smells the source's name beside the counts, so "safe" can attach to one machine; or apply marks
-as a per-machine allowance in the coordinator instead of in the fly's weights.
+**Tried: shards**, so that a mark teaches only the individual smelling the marked machine
+(`FLYSOC_SHARDS=1 FLYSOC_REPLICAS=10`, no marks yet, dev slices): the identity fly then names 0 of 9
+incidents (3 queue entries, all false), against 2 of 9 for one fly. Its threshold rises to 166
+MBON spikes/s, set by the busiest shard, and C17693 never crosses it. Rejected before adding marks.
+**Next**: a mark has to attach to one machine, and the identity fly's odour has no machine in it.
+Left: a fly that smells the source's name beside the counts (names drowned the counts before, O16),
+or a per-machine allowance in the coordinator, which is a suppression list rather than learning.
 **Lesson**: learning from a mark generalises exactly as far as the odour does. A fly that cannot
 tell machines apart cannot be told that one machine is fine.
 
